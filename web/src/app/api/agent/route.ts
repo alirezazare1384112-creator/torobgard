@@ -71,10 +71,35 @@ function runTool(call: ToolCall): unknown {
       }
       return tools.planShoppingTrip(items, start, typeof call.args.max_shops === "number" ? call.args.max_shops : 3);
     }
+    case "check_shop_hours":
+      return tools.checkShopHours(String(call.args.shop_id ?? ""), call.args.day ? String(call.args.day) : undefined);
+    case "prepare_seller_inquiry":
+      return tools.prepareSellerInquiry({
+        shop_id: String(call.args.shop_id ?? ""),
+        product_id: String(call.args.product_id ?? ""),
+        color: call.args.color ? String(call.args.color) : null,
+        size: call.args.size ? String(call.args.size) : null,
+        ask_installment: !!call.args.ask_installment,
+      });
+    case "record_seller_confirmation":
+      return tools.recordSellerConfirmation({
+        shop_id: String(call.args.shop_id ?? ""),
+        product_id: String(call.args.product_id ?? ""),
+        status: (call.args.status as any) ?? "unconfirmed",
+        confirmed_price_toman: typeof call.args.confirmed_price_toman === "number" ? call.args.confirmed_price_toman : null,
+        in_stock: typeof call.args.in_stock === "boolean" ? call.args.in_stock : null,
+        note: call.args.note ? String(call.args.note) : null,
+      });
+    case "ask_user":
+      // pseudo-tool: the agent wants to ask the user a clarifying question.
+      // We do NOT call any backend tool; the orchestrator returns the question directly.
+      return { kind: "ask_user", question: String(call.args.question ?? ""), why: String(call.args.why ?? "") };
     default:
       return { error: `unknown tool: ${call.tool}` };
   }
 }
+
+interface Msg { role: "user" | "assistant"; content: string }
 
 export async function POST(req: Request) {
   let body: any;
@@ -87,14 +112,20 @@ export async function POST(req: Request) {
   if (!question) {
     return NextResponse.json({ error: "message is required", code: "validation_error" }, { status: 400 });
   }
+  // optional conversation history so the agent can keep context (Phase 1 ask:
+  // "don't re-ask answered questions"). Each item {role, content}.
+  const history: Msg[] = Array.isArray(body?.history)
+    ? body.history.filter((m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+    : [];
 
   try {
     const zai = await ZAI.create();
 
-    // Step 1: ask the model which tool to call.
+    // Step 1: ask the model which tool to call, with conversation history.
     const pick = await zai.chat.completions.create({
       messages: [
         { role: "assistant", content: AGENT_SYSTEM_PROMPT },
+        ...history.map((m) => ({ role: m.role, content: m.content })),
         { role: "user", content: question },
       ],
       thinking: { type: "disabled" },
@@ -108,7 +139,6 @@ export async function POST(req: Request) {
     let toolError: string | null = null;
 
     if (!call) {
-      // the model didn't emit a tool call; answer directly from its text as a fallback
       return NextResponse.json({
         reply: pickText.trim() || "متأسفم، نتونستم ابزار مناسبی انتخاب کنم. لطفاً سؤال را دقیق‌تر بپرسید.",
         tool: null,
@@ -124,6 +154,19 @@ export async function POST(req: Request) {
     } catch (e) {
       toolError = e instanceof Error ? e.message : String(e);
       toolResult = { error: toolError };
+    }
+
+    // If the agent asked the user a clarifying question, short-circuit and return it
+    // directly (no second LLM call needed — the question is already Persian).
+    if (toolResult && typeof toolResult === "object" && (toolResult as any).kind === "ask_user") {
+      const au = toolResult as { kind: string; question: string; why: string };
+      return NextResponse.json({
+        reply: au.question,
+        tool: "ask_user",
+        tool_args: toolArgs,
+        tool_result: toolResult,
+        tool_error: null,
+      });
     }
 
     // Step 2: ask the model for a Persian answer grounded in the tool result.

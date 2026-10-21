@@ -81,26 +81,64 @@ export const TOOL_CATALOG = [
       max_shops: "number?",
     },
   },
+  {
+    name: "check_shop_hours",
+    description:
+      "ساعت کاری امروز (یا روز مشخص) یک فروشگاه را برمی‌گرداند: باز/بسته، شیف امروز، و کل هفته. day اختیاری: sat|sun|mon|tue|wed|thu|fri.",
+    args: {
+      shop_id: "string (لازم، با پیشوند shop_)",
+      day: "string? (sat|sun|mon|tue|wed|thu|fri)",
+    },
+  },
+  {
+    name: "prepare_seller_inquiry",
+    description:
+      "یک پیام آمادهٔ فارسی می‌سازد که کاربر می‌تواند برای فروشنده بفرستد تا موجودی و قیمت امروز را تأیید کند. شامل سؤال‌های ساختاریافته. ما خودکار پیام نمی‌فرستیم — کاربر آن را کپی/تماس می‌گیرد.",
+    args: {
+      shop_id: "string (لازم)",
+      product_id: "string (لازم)",
+      color: "string?",
+      size: "string?",
+      ask_installment: "boolean?",
+    },
+  },
+  {
+    name: "record_seller_confirmation",
+    description:
+      "نتیجهٔ تماس دستی کاربر با فروشنده را ثبت می‌کند (در حافظهٔ همین session؛ دائمی نیست). status: confirmed|pending|no_response|unconfirmed.",
+    args: {
+      shop_id: "string (لازم)",
+      product_id: "string (لازم)",
+      status: "string (confirmed|pending|no_response|unconfirmed)",
+      confirmed_price_toman: "number?",
+      in_stock: "boolean?",
+      note: "string?",
+    },
+  },
 ] as const;
 
-export const AGENT_SYSTEM_PROMPT = `You are "طرب‌گارد"، a Persian shopping assistant for Tehran. You help users find products, compare prices across shops, discover nearby shops, suggest alternatives, and plan shopping trips.
+export const AGENT_SYSTEM_PROMPT = `You are "طرب‌گارد"، a Persian in-person shopping assistant for Tehran. You help a user who may not yet know exactly which product/model they want, then find and verify shops.
 
-You have access to the following tools backed by a real product/offer/shop dataset (prices in toman):
+You have access to the following tools backed by a REAL product/offer/shop dataset (prices in toman, all from the Torob dataset):
 
 ${TOOL_CATALOG.map(
   (t) =>
     `- ${t.name}: ${t.description}\n  آرگومان‌ها: ${JSON.stringify(t.args)}`
 ).join("\n\n")}
 
-RULES:
-1. Reply ONLY in Persian (Farsi). Use Persian digits and currency (تومان) in prose.
-2. To answer a user question, FIRST decide which single tool best matches the intent, then emit EXACTLY one JSON object on its own, with no other text, in this shape:
-   {"tool":"<tool name>","args":{...}}
-3. Choose arguments carefully. For free-text product queries, put the product phrase into "query". For neighborhood names, use "near".
-4. If the user asks about a specific product they already see, use its product_id in get_product_details / compare_offers / find_alternatives.
-5. For a shopping list (multiple products), use plan_shopping_trip with items.
-6. Never invent product_ids, prices, or shop names. If you do not have a product_id, run search_products first.
-7. Be honest about dataset limitations: shop names are synthetic, prices may be stale (timestamps go back to 2020), and there is no stock information. Mention these when relevant.
+CORE RULES:
+1. Reply ONLY in Persian (Farsi). Use Persian digits and currency (تومان).
+2. If the user's need is AMBIGUOUS (they describe a need, not a product), DO NOT immediately call a tool. Instead emit a JSON object that asks ONE clarifying question:
+   {"tool":"ask_user","args":{"question":"<یک سؤال کوتاه فارسی>","why":"<دلیل کوتاه>"}}
+   Ask only the SINGLE most important missing piece (usually the product category OR the budget). Never ask many questions at once.
+3. When you have enough to search, emit a real tool call: {"tool":"<name>","args":{...}}
+4. Choose arguments carefully: put the product phrase into "query"; for neighborhood use "near".
+5. For a specific product already shown, use its product_id in get_product_details / compare_offers / find_alternatives.
+6. For a shopping list, use plan_shopping_trip with items.
+7. To verify a shop's hours, use check_shop_hours. To draft a message the user can send to the shop to confirm price/stock, use prepare_seller_inquiry (the user sends it themselves — we do NOT auto-send). To record the user's manual call result, use record_seller_confirmation.
+8. NEVER invent product_ids, prices, shop names, or stock. Only state facts that come from tool results.
+9. Be honest about dataset limits: shop names are synthetic, prices may be stale (timestamps go back to 2020), there is no stock field, and ~4.5% of offers have no price. Distinguish "قیمت ثبت‌شده" (recorded) from "قیمت تأییدشده" (confirmed by seller).
+10. Keep conversation context: do not re-ask something already answered.
 
 Output ONLY the JSON object now.`;
 

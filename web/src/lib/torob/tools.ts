@@ -745,6 +745,160 @@ export class ShoppingTools {
       unmatched_product_ids: unmatched,
     };
   }
+
+  // --------------------------------------------------- shop hours (today + any day)
+  /** Returns the open/closed status for a shop, today by default or for a given
+   *  weekday key ("sat".."fri"). Uses Asia/Tehran time. */
+  checkShopHours(shop_id: string, day?: string): ShopHoursResponse {
+    if (!shop_id || !shop_id.startsWith("shop_")) throw new Error("invalid shop_id");
+    const r = this.db
+      .prepare("SELECT weekly_hours FROM shops WHERE shop_id = ?")
+      .get(shop_id) as { weekly_hours: string | null } | undefined;
+    if (!r) return { status: "not_found", shop_id, day: day ?? todayKey(), hours: null, open_now: null, today_hours: null, full_week: null };
+    const key = (day as DayKey) || todayKey();
+    const today = parseTodayHours(r.weekly_hours);
+    let fullWeek: Record<string, { status: string; open: string; close: string }> | null = null;
+    if (r.weekly_hours) {
+      try {
+        const h = JSON.parse(r.weekly_hours);
+        if (h && typeof h === "object") {
+          fullWeek = {};
+          for (const d of DAY_KEYS) {
+            const dd = h[d];
+            if (!dd) { fullWeek[d] = { status: "unknown", open: "", close: "" }; continue; }
+            const shift = Array.isArray(dd.shifts) && dd.shifts.length ? dd.shifts[0] : null;
+            fullWeek[d] = {
+              status: dd.status ?? "unknown",
+              open: shift ? String(shift.start_time ?? "").slice(0, 5) : "",
+              close: shift ? String(shift.end_time ?? "").slice(0, 5) : "",
+            };
+          }
+        }
+      } catch {}
+    }
+    let dayInfo: { status: string; open: string; close: string } | null = null;
+    if (fullWeek && fullWeek[key]) dayInfo = fullWeek[key];
+    return {
+      status: "ok",
+      shop_id,
+      day: key,
+      hours: r.weekly_hours,
+      open_now: today?.isOpen ?? null,
+      today_hours: today ? { status: today.status, open: today.open, close: today.close } : null,
+      full_week: fullWeek,
+      day_info: dayInfo,
+    };
+  }
+
+  // ------------------------------------------------- prepare seller inquiry text
+  /** Builds a ready-to-send Persian inquiry message asking the shop to confirm
+   *  price + stock for a specific product. Returns the message text + the
+   *  structured questions. The user (or agent) then sends this via phone/messenger
+   *  themselves — we do NOT auto-send (no telephony channel in this environment). */
+  prepareSellerInquiry(args: {
+    shop_id: string;
+    product_id: string;
+    color?: string | null;
+    size?: string | null;
+    ask_installment?: boolean;
+  }): SellerInquiryResponse {
+    const { shop_id, product_id } = args;
+    if (!shop_id || !shop_id.startsWith("shop_")) throw new Error("invalid shop_id");
+    if (!product_id || !product_id.startsWith("product_")) throw new Error("invalid product_id");
+    const shop = this.db
+      .prepare("SELECT shop_id, name, contacts FROM shops WHERE shop_id = ?")
+      .get(shop_id) as { shop_id: string; name: string; contacts: string | null } | undefined;
+    if (!shop) return { status: "not_found", message: null, questions: [], shop: null, product: null };
+    const product = this.getProductDetails(product_id);
+    if (!product) return { status: "not_found", message: null, questions: [], shop: null, product: null };
+    // the cheapest known offer for this product at this shop, if any
+    const known = this.db
+      .prepare(
+        "SELECT price_toman, price_status, price_changed_at FROM offers WHERE shop_id = ? AND product_id = ?"
+      )
+      .get(shop_id, product_id) as { price_toman: number | null; price_status: string; price_changed_at: string | null } | undefined;
+    const phone = parseContacts(shop.contacts)?.find((c) => c.channel === "phone")?.display_number ?? null;
+    const lines = [
+      `سلام، برای محصول زیر لطفاً موجودی و قیمت امروز را تأیید کنید:`,
+      ``,
+      `محصول: ${product.title}`,
+      product.brand ? `برند: ${product.brand}` : null,
+      product.model ? `مدل: ${product.model}` : null,
+      args.color ? `رنگ موردنظر: ${args.color}` : null,
+      args.size ? `اندازه: ${args.size}` : null,
+      known && known.price_status === "ok" && known.price_toman !== null
+        ? `قیمت ثبت‌شده در تورب: ${toFaNum(known.price_toman)} تومان (ممکن است قدیمی باشد)`
+        : `قیمت ثبت‌شده: نامشخص`,
+      known && known.price_changed_at ? `آخرین تغییر قیمت: ${known.price_changed_at.slice(0, 10)}` : null,
+      ``,
+      `سؤالات:`,
+      `۱) آیا همین مدل هم‌اکنون موجود است؟`,
+      `۲) رنگ/اندازهٔ موردنظر موجود است؟`,
+      `۳) قیمت نهایی امروز چقدر است؟`,
+      `۴) آیا تخفیف یا هزینهٔ جانبی دارد؟`,
+      `۵) خرید اقساطی ممکن است؟ با چه شرایطی؟`,
+      `۶) امکان نگه‌داشتن محصول تا مراجعه هست؟`,
+    ].filter((x) => x !== null) as string[];
+    const message = lines.join("\n");
+    return {
+      status: "ok",
+      message,
+      questions: [
+        "موجودی همین مدل",
+        "رنگ/اندازه",
+        "قیمت امروز",
+        "تخفیف/هزینه جانبی",
+        args.ask_installment ? "شرایط اقساط" : null,
+        "نگه‌داشتن محصول",
+      ].filter((x): x is string => x !== null),
+      shop: { shop_id: shop.shop_id, name: shop.name, phone },
+      product: { product_id: product.product_id, title: product.title },
+      known_price: known && known.price_status === "ok" ? known.price_toman : null,
+      known_price_changed_at: known?.price_changed_at ?? null,
+    };
+  }
+
+  // ----------------------------------------------- record a manual seller confirmation
+  /** Records the result of a manual seller contact (user called/texted and
+   *  entered the answer). Stored in an in-memory Map for the session — there is
+   *  no persistence layer, so confirmations do not survive a server restart.
+   *  This is deliberately honest: we never claim a confirmation we don't have. */
+  recordSellerConfirmation(args: {
+    shop_id: string;
+    product_id: string;
+    status: "confirmed" | "pending" | "no_response" | "unconfirmed";
+    confirmed_price_toman?: number | null;
+    in_stock?: boolean | null;
+    note?: string | null;
+  }): ConfirmationResponse {
+    const { shop_id, product_id } = args;
+    if (!shop_id || !shop_id.startsWith("shop_")) throw new Error("invalid shop_id");
+    if (!product_id || !product_id.startsWith("product_")) throw new Error("invalid product_id");
+    const key = `${shop_id}:${product_id}`;
+    const rec: ConfirmationRecord = {
+      shop_id,
+      product_id,
+      status: args.status,
+      confirmed_price_toman: args.confirmed_price_toman ?? null,
+      in_stock: args.in_stock ?? null,
+      note: args.note ?? null,
+      recorded_at: new Date().toISOString(),
+      source: "manual",
+    };
+    confirmations.set(key, rec);
+    return { status: "ok", record: rec, note: "recorded in memory for this session (not persisted)" };
+  }
+
+  getConfirmation(shop_id: string, product_id: string): ConfirmationRecord | null {
+    return confirmations.get(`${shop_id}:${product_id}`) ?? null;
+  }
+}
+
+// session-scoped manual confirmations (in-memory, no persistence layer)
+const confirmations = new Map<string, ConfirmationRecord>();
+
+function toFaNum(n: number): string {
+  return n.toLocaleString("fa-IR");
 }
 
 function sum(m: Map<string, number>): number {
@@ -865,6 +1019,44 @@ export interface TripResponse {
     straight_line_distance_km_from_start: number | null;
   }[];
   unmatched_product_ids: string[];
+}
+
+export interface ShopHoursResponse {
+  status: string;
+  shop_id: string;
+  day: string;
+  hours: string | null;
+  open_now: boolean | null;
+  today_hours: { status: string; open: string; close: string } | null;
+  full_week: Record<string, { status: string; open: string; close: string }> | null;
+  day_info: { status: string; open: string; close: string } | null;
+}
+
+export interface SellerInquiryResponse {
+  status: string;
+  message: string | null;
+  questions: string[];
+  shop: { shop_id: string; name: string; phone: string | null } | null;
+  product: { product_id: string; title: string } | null;
+  known_price: number | null;
+  known_price_changed_at: string | null;
+}
+
+export interface ConfirmationRecord {
+  shop_id: string;
+  product_id: string;
+  status: "confirmed" | "pending" | "no_response" | "unconfirmed";
+  confirmed_price_toman: number | null;
+  in_stock: boolean | null;
+  note: string | null;
+  recorded_at: string;
+  source: "manual";
+}
+
+export interface ConfirmationResponse {
+  status: string;
+  record: ConfirmationRecord;
+  note: string;
 }
 
 function result(items: SearchItem[], total: number, f: RequiredExcept<Filters>, reason: string | null): SearchResponse {

@@ -19,8 +19,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Slider } from "@/components/ui/slider";
 import { formatDistanceKm, formatNumber, formatPersianDate, formatToman, toPersianDigits } from "./format";
 import { SyntheticNameBadge } from "./disclaimers";
+import { DEFAULT_WEIGHTS, rankOffers, type RankWeights, type RankedOffer } from "./rank";
 import type {
   AlternativeItem,
   AlternativesResponse,
@@ -138,11 +140,14 @@ function SpecsTable({ specs }: { specs: ProductDetails["specs"] }) {
 function OfferRow({
   offer,
   cheapest,
+  ranked,
 }: {
   offer: CompareOffer;
   cheapest: number | null;
+  ranked?: RankedOffer;
 }) {
   const isCheapest = cheapest !== null && offer.price_status === "ok" && offer.price_toman === cheapest;
+  const top = ranked?.breakdown?.some((b) => b.contribution > 0) ? ranked : undefined;
   return (
     <div
       className={`flex flex-col gap-2 rounded-lg border p-4 ${
@@ -162,7 +167,15 @@ function OfferRow({
             )}
           </div>
         </div>
-        {priceStatusBadge(offer.price_status)}
+        <div className="flex items-center gap-2">
+          {top && (
+            <Badge variant="default" className="gap-1 font-num">
+              <CheckCircle2 className="size-3" aria-hidden />
+              امتیاز {toPersianDigits(top.score)}
+            </Badge>
+          )}
+          {priceStatusBadge(offer.price_status)}
+        </div>
       </div>
 
       {offer.shop.address && (
@@ -183,6 +196,22 @@ function OfferRow({
           <Badge className="gap-1 bg-emerald-600 text-white hover:bg-emerald-600">
             <Zap className="size-3" aria-hidden />
             ارسال سریع
+          </Badge>
+        )}
+        {offer.shop.has_installment && (
+          <Badge className="gap-1 bg-amber-600 text-white hover:bg-amber-600">
+            <Zap className="size-3" aria-hidden />
+            قسطی
+          </Badge>
+        )}
+        {offer.shop.today_hours && (
+          <Badge variant="outline" className="gap-1">
+            <Calendar className="size-3" aria-hidden />
+            {offer.shop.open_now === true
+              ? `باز • تا ${toPersianDigits(offer.shop.today_hours.close)}`
+              : offer.shop.open_now === false
+                ? `بسته • از ${toPersianDigits(offer.shop.today_hours.open)}`
+                : "ساعت کاری نامشخص"}
           </Badge>
         )}
         {isCheapest && (
@@ -210,6 +239,40 @@ function OfferRow({
         <p className="text-xs text-muted-foreground">
           گارانتی: {typeof offer.warranty === "string" ? offer.warranty : JSON.stringify(offer.warranty)}
         </p>
+      )}
+
+      {/* Explainable rank breakdown */}
+      {top && top.breakdown.length > 0 && (
+        <details className="mt-1 rounded-md bg-muted/40 p-2 text-xs">
+          <summary className="cursor-pointer font-medium text-muted-foreground">چرا این امتیاز؟ (رتبه‌بندی قابل‌توضیح)</summary>
+          <ul className="mt-2 space-y-1">
+            {top.breakdown
+              .filter((b) => b.weight > 0)
+              .map((b) => (
+                <li key={b.criterion} className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">{b.label}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="font-num">{toPersianDigits(Math.round(b.raw * 100))}٪</span>
+                    <span className="text-muted-foreground">×{toPersianDigits(b.weight)}</span>
+                    <span className="text-[10px] text-muted-foreground">({b.note})</span>
+                  </span>
+                </li>
+              ))}
+          </ul>
+        </details>
+      )}
+
+      {/* Phone + verify (compact) */}
+      {offer.shop.contacts && offer.shop.contacts.some((c) => c.channel === "phone") && (
+        <div className="mt-1 flex items-center gap-2">
+          <a href={`tel:${offer.shop.contacts!.find((c) => c.channel === "phone")!.display_number.replace(/\s/g, "")}`}>
+            <Button type="button" variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
+              <Truck className="size-3.5" aria-hidden />
+              تماس: {toPersianDigits(offer.shop.contacts!.find((c) => c.channel === "phone")!.display_number)}
+            </Button>
+          </a>
+          <span className="text-[11px] text-amber-600">قیمت قدیمی ممکن است — تماس بگیرید</span>
+        </div>
       )}
     </div>
   );
@@ -276,6 +339,22 @@ export function ProductView({
   const offers = compare?.offers ?? [];
   const summary = compare?.summary;
   const cheapest = summary?.min_price_toman ?? null;
+
+  // explainable ranking (user-tunable weights)
+  const [weights, setWeights] = React.useState<RankWeights>(DEFAULT_WEIGHTS);
+  const ranked = React.useMemo(() => {
+    return rankOffers(
+      offers.map((o) => ({
+        price_toman: o.price_toman,
+        price_status: o.price_status,
+        price_changed_at: o.price_changed_at,
+        distance_km: o.shop.distance_km,
+        open_now: o.shop.open_now,
+        has_installment: !!o.shop.has_installment,
+      })),
+      weights
+    );
+  }, [offers, weights]);
 
   const loadAlternatives = async () => {
     if (showAlts) {
@@ -424,11 +503,47 @@ export function ProductView({
               هیچ پیشنهادی برای این محصول یافت نشد.
             </Card>
           ) : (
+            <React.Fragment>
+            {/* Rank weights — tunable by the user */}
+            <details className="rounded-lg border border-border bg-muted/30 p-3 text-xs">
+              <summary className="cursor-pointer font-medium">رتبه‌بندی قابل‌تنظیم — وزن معیارها</summary>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {([
+                  ["price", "قیمت", "ارزان‌تر = امتیاز بالاتر"],
+                  ["distance", "فاصله", "نزدیک‌تر = امتیاز بالاتر"],
+                  ["stock_confidence", "اطمینان به موجودی", "تأیید فروشنده = امتیاز بالاتر"],
+                  ["open_now", "باز بودن", "باز اکنون = امتیاز بالاتر"],
+                  ["installment", "اقساطی", "دارای اقساط = امتیاز بالاتر"],
+                  ["freshness", "به‌روز بودن قیمت", "قیمت جدیدتر = امتیاز بالاتر"],
+                ] as const).map(([key, label, hint]) => (
+                  <div key={key} className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium">{label}</span>
+                      <span className="font-num text-muted-foreground">{toPersianDigits(Math.round(weights[key] * 100))}٪</span>
+                    </div>
+                    <Slider
+                      value={[Math.round(weights[key] * 100)]}
+                      min={0}
+                      max={100}
+                      step={5}
+                      onValueChange={(v) => setWeights((w) => ({ ...w, [key]: v[0] / 100 }))}
+                      aria-label={label}
+                    />
+                    <span className="text-[11px] text-muted-foreground">{hint}</span>
+                  </div>
+                ))}
+              </div>
+              <Button type="button" variant="ghost" size="sm" className="mt-2 h-8" onClick={() => setWeights(DEFAULT_WEIGHTS)}>بازنشانی وزن‌ها</Button>
+            </details>
+
             <div className="scrollbar-thin max-h-[60vh] space-y-3 overflow-y-auto pr-1">
-              {offers.map((o) => (
-                <OfferRow key={o.offer_id} offer={o} cheapest={cheapest} />
-              ))}
+              {ranked.map((r) => {
+                const o = offers.find((x) => x.price_toman === r.price_toman && x.shop.distance_km === r.distance_km);
+                if (!o) return null;
+                return <OfferRow key={o.offer_id} offer={o} cheapest={cheapest} ranked={r} />;
+              })}
             </div>
+            </React.Fragment>
           )}
 
           {altsError && (

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bot, Home as HomeIcon, MapPin, Moon, Navigation, Search, Sparkles, Store, Sun } from "lucide-react";
+import { Bot, Home as HomeIcon, MapPin, Moon, Navigation, Route, Search, Store, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 
 import { Button } from "@/components/ui/button";
@@ -13,8 +13,8 @@ import { ProductView } from "@/components/torob/product-view";
 import { ShopsView } from "@/components/torob/shops-view";
 import { MapView } from "@/components/torob/map-view";
 import { NearbyView } from "@/components/torob/nearby-view";
-import { ExploreView } from "@/components/torob/explore-view";
-import { AgentView } from "@/components/torob/agent-view";
+import { AssistantView } from "@/components/torob/assistant-view";
+import { TripView } from "@/components/torob/trip-view";
 import {
   NEIGHBORHOODS,
   type MetaResponse,
@@ -23,16 +23,16 @@ import {
   type StatsResponse,
 } from "@/components/torob/types";
 
-type View = "home" | "explore" | "search" | "product" | "shops" | "nearby" | "map" | "agent";
+type View = "home" | "assistant" | "trip" | "search" | "product" | "shops" | "nearby" | "map";
 
 const TABS: { id: View; label: string; icon: React.ReactNode; hideInNav?: boolean }[] = [
   { id: "home", label: "خانه", icon: <HomeIcon className="size-4" aria-hidden /> },
-  { id: "explore", label: "کاوش", icon: <Sparkles className="size-4" aria-hidden /> },
+  { id: "assistant", label: "دستیار خرید", icon: <Bot className="size-4" aria-hidden /> },
   { id: "nearby", label: "خرید حضوری", icon: <Navigation className="size-4" aria-hidden /> },
+  { id: "trip", label: "برنامهٔ خرید", icon: <Route className="size-4" aria-hidden /> },
   { id: "search", label: "جست‌وجو", icon: <Search className="size-4" aria-hidden /> },
   { id: "shops", label: "فروشگاه‌ها", icon: <Store className="size-4" aria-hidden /> },
   { id: "map", label: "نقشه", icon: <MapPin className="size-4" aria-hidden /> },
-  { id: "agent", label: "دستیار هوشمند", icon: <Bot className="size-4" aria-hidden /> },
 ];
 
 function ThemeToggle() {
@@ -192,6 +192,7 @@ export default function Home() {
                 loadingMeta={loadingMeta}
                 loadingStats={loadingStats}
                 onSearch={goSearch}
+                onOpenAssistant={() => setView("assistant")}
               />
             )}
             {view === "search" && (
@@ -221,19 +222,19 @@ export default function Home() {
                 onNearChange={(n) => setShopsNear(n)}
               />
             )}
-            {view === "explore" && (
-              <ExploreView
+            {view === "assistant" && (
+              <AssistantView
                 onPickProduct={(id) => {
                   setSelectedProductId(id);
                   setView("product");
                 }}
               />
             )}
+            {view === "trip" && <TripView />}
             {view === "nearby" && <NearbyView />}
             {view === "map" && (
               <MapView near={mapNear} onNearChange={(n) => setMapNear(n)} />
             )}
-            {view === "agent" && <AgentView />}
           </motion.div>
         </AnimatePresence>
       </main>
