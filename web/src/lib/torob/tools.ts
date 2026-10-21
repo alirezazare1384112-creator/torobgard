@@ -209,16 +209,20 @@ export class ShoppingTools {
     // to "...بی صدا با سیم" — it contains "با سیم" and NOT "بی سIM", so a
     // wireless query (requires "بی سیم") excludes it, and a wired query
     // (requires "با سیم" and forbids "بی سیم") includes it.
+    // Phase-2 parity: also match the single-token adjective "سیمی" and the
+    // English words "wireless"/"wired".
     const connConds: string[] = [];
     const connParams: string[] = [];
     if (parsed.connectivity === "wireless") {
-      connConds.push("AND p.title_norm LIKE ?");
-      connParams.push("%بی سیم%");
-    } else if (parsed.connectivity === "wired") {
-      connConds.push("AND p.title_norm LIKE ?");
+      connConds.push("AND (p.title_norm LIKE ? OR p.title_norm LIKE ?)");
+      connParams.push("%بی سیم%", "%wireless%");
       connConds.push("AND p.title_norm NOT LIKE ?");
-      connParams.push("%با سیم%");
-      connParams.push("%بی سیم%");
+      connConds.push("AND p.title_norm NOT LIKE ?");
+      connConds.push("AND p.title_norm NOT LIKE ?");
+      connParams.push("%با سیم%", "%سیمی%", "%wired%");
+    } else if (parsed.connectivity === "wired") {
+      connConds.push("AND (p.title_norm LIKE ? OR p.title_norm LIKE ? OR p.title_norm LIKE ?)");
+      connParams.push("%با سیم%", "%سیمی%", "%wired%");
     }
     const connClause = connConds.join(" ");
 
@@ -467,13 +471,18 @@ export class ShoppingTools {
       condSql += " AND o.product_id IN (SELECT product_id FROM products WHERE category = ?)";
       p.push(f.category);
     }
+    if (f.brand) {
+      condSql += " AND o.product_id IN (SELECT product_id FROM products WHERE brand = ?)";
+      p.push(f.brand);
+    }
     const rows = this.db
       .prepare(
         `
         SELECT s.shop_id, s.name, s.address, s.location_label, s.lat, s.lon,
                s.supports_fast_delivery, s.website_url, s.instagram,
                s.weekly_hours, s.payment_options,
-               COUNT(o.offer_id) AS matching_offers
+               COUNT(o.offer_id) AS matching_offers,
+               MIN(CASE WHEN o.price_status = 'ok' THEN o.price_toman END) AS best_price_toman
         FROM shops s JOIN offers o ON o.shop_id = s.shop_id
         WHERE 1=1 ${condSql}
         GROUP BY s.shop_id
@@ -501,12 +510,32 @@ export class ShoppingTools {
         weekly_hours: r.weekly_hours ?? null,
         payment_options: r.payment_options ?? null,
         matching_offers: r.matching_offers ?? 0,
+        best_price_toman: r.best_price_toman ?? null,
         distance_km: d,
         name_is_synthetic_warning: true,
       });
     }
     if (f.sort === "distance" && f.near) {
       shops.sort((a, b) => (a.distance_km ?? Infinity) - (b.distance_km ?? Infinity));
+    } else if (f.sort === "price_asc") {
+      shops.sort(
+        (a, b) =>
+          (a.best_price_toman ?? Infinity) - (b.best_price_toman ?? Infinity) ||
+          b.matching_offers - a.matching_offers
+      );
+    } else if (f.sort === "price_desc") {
+      shops.sort(
+        (a, b) =>
+          (b.best_price_toman ?? -Infinity) - (a.best_price_toman ?? -Infinity) ||
+          b.matching_offers - a.matching_offers
+      );
+    } else {
+      // relevance / matching_offers: most matching offers first, then nearest
+      shops.sort(
+        (a, b) =>
+          b.matching_offers - a.matching_offers ||
+          (a.distance_km ?? Infinity) - (b.distance_km ?? Infinity)
+      );
     }
     return {
       status: shops.length ? "ok" : "no_results",
@@ -537,7 +566,7 @@ export class ShoppingTools {
         WHERE p.category = ? AND p.product_id != ?
         GROUP BY p.product_id
         ${budgetSql}
-        ORDER BY min_price DESC
+        ORDER BY min_price ASC
         LIMIT ?
         `
       )
@@ -687,6 +716,7 @@ export interface Shop {
   weekly_hours: string | null;
   payment_options: string | null;
   matching_offers: number;
+  best_price_toman: number | null;
   distance_km: number | null;
   name_is_synthetic_warning: boolean;
 }

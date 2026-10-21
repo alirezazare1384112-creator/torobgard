@@ -5,7 +5,7 @@ import { motion } from "framer-motion";
 import { Clock, CreditCard, MapPin, Store, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { formatDistanceKm, toPersianDigits } from "./format";
+import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
 import { SyntheticNameBadge } from "./disclaimers";
 import type { ShopItem } from "./types";
 
@@ -48,6 +48,11 @@ export function ShopCard({ shop }: { shop: ShopItem }) {
           <Badge variant="outline" className="font-num">
             {toPersianDigits(shop.matching_offers)} پیشنهاد منطبق
           </Badge>
+          {shop.best_price_toman !== null && shop.best_price_toman !== undefined && (
+            <Badge variant="secondary" className="font-num">
+              بهترین قیمت: {formatToman(shop.best_price_toman)}
+            </Badge>
+          )}
         </div>
 
         {(shop.weekly_hours || shop.payment_options) && (

@@ -65,9 +65,12 @@ const norm = (s: string) => normalizeText(s);
 const wiredLeak = wirelessAll.items.filter((i) => norm(i.title).includes("با سیم") && !norm(i.title).includes("بی سیم"));
 ok("WIRELESS query excludes WIRED titles", wiredLeak.length === 0, wiredLeak.map((i) => i.title));
 
-// and must also exclude the quiet wired "ماوس بی‌صدا با سیم"
-const quietLeak = wirelessAll.items.filter((i) => norm(i.title).includes("بی صدا"));
-ok("WIRELESS query excludes quiet wired 'بی‌صدا با سیم'", quietLeak.length === 0, quietLeak.map((i) => i.title));
+// and must also exclude the quiet wired "ماوس بی‌صدا با سیم" (silent WIRED).
+// Note: a "ماوس بی‌سیم ... بی‌صدا" (wireless AND silent) is a valid wireless hit.
+const quietLeak = wirelessAll.items.filter(
+  (i) => norm(i.title).includes("بی صدا") && norm(i.title).includes("با سیم") && !norm(i.title).includes("بی سیم")
+);
+ok("WIRELESS query excludes quiet WIRED 'بی‌صدا با سیم'", quietLeak.length === 0, quietLeak.map((i) => i.title));
 
 // budget wired query: "ماوس با سیم" should return wired, not wireless
 const wiredAll = t.searchProducts("ماوس با سیم", { limit: 100 });

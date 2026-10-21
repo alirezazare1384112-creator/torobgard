@@ -120,10 +120,21 @@ export function parseQuery(query: string): ParsedQuery {
 
   const tokens = norm.split(/\s+/).filter(Boolean);
 
-  // connectivity: detect adjacent tokens "بی سیم" or "با سیم". normalizeText
+  // connectivity: detect "بی سIM" (wireless) or "با سIM" (wired). normalizeText
   // already collapsed ZWNJ to a space, so both spellings land here as two tokens.
-  if (hasTokenPair(tokens, "بی", "سیم")) out.connectivity = "wireless";
-  else if (hasTokenPair(tokens, "با", "سیم")) out.connectivity = "wired";
+  // Also support the single-token adjectives "سیمی", plus English "wireless"/"wired"
+  // (Phase-2 parity with the Python tools._connection_mode).
+  const hasWireless =
+    hasTokenPair(tokens, "بی", "سیم") || tokens.includes("wireless");
+  const hasWired =
+    hasTokenPair(tokens, "با", "سیم") ||
+    tokens.includes("سیمی") ||
+    tokens.includes("wired");
+  if (hasWireless && !hasWired) out.connectivity = "wireless";
+  else if (hasWired && !hasWireless) out.connectivity = "wired";
+
+  // strip connectivity tokens from the product-terms stream (applied below).
+  const stripConn = new Set(["بی", "با", "سیم", "سیمی", "wireless", "wired"]);
 
   // extract a NUMERIC budget expression like "تا ۱ میلیون", "زیر 2 میلیون",
   // "حداکثر 500 هزار". The prefix sets the bound direction.
@@ -145,6 +156,6 @@ export function parseQuery(query: string): ParsedQuery {
     .replace(/(زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از)/g, " ")
     .replace(/toman/gi, " ");
   const termTokens = termStream.split(/\s+/).filter((t) => t.length > 1);
-  out.terms = termTokens.filter((t) => t !== "بی" && t !== "با" && t !== "سیم");
+  out.terms = termTokens.filter((t) => !stripConn.has(t));
   return out;
 }

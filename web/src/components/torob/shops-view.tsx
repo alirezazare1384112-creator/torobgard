@@ -160,6 +160,8 @@ export function ShopsView({
                 <SelectContent>
                   <SelectItem value="matching_offers">بیشترین پیشنهاد منطبق</SelectItem>
                   <SelectItem value="distance">نزدیک‌ترین</SelectItem>
+                  <SelectItem value="price_asc">ارزان‌ترین فروشگاه</SelectItem>
+                  <SelectItem value="price_desc">گران‌ترین فروشگاه</SelectItem>
                 </SelectContent>
               </Select>
             </div>

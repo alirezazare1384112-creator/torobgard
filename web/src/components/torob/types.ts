@@ -104,6 +104,7 @@ export interface ShopItem {
   weekly_hours: string | null;
   payment_options: string | null;
   matching_offers: number;
+  best_price_toman: number | null;
   distance_km: number | null;
   name_is_synthetic_warning: boolean;
 }
@@ -139,7 +140,7 @@ export interface AgentResponse {
 }
 
 export type SortOption = "relevance" | "price_asc" | "price_desc" | "distance";
-export type ShopSortOption = "matching_offers" | "distance";
+export type ShopSortOption = "matching_offers" | "distance" | "price_asc" | "price_desc";
 
 /** The 6 Tehran neighborhoods the backend supports (NEIGHBORHOODS in tools.ts). */
 export const NEIGHBORHOODS = [

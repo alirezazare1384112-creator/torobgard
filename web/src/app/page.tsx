@@ -264,7 +264,10 @@ export default function Home() {
 
           <div className="mt-6 flex flex-col items-center justify-between gap-2 border-t border-border pt-4 text-xs text-muted-foreground sm:flex-row">
             <p>
-              © {new Date().getFullYear()} طرب‌گارد — نمونه توسعه با داده مصنوعی.
+              © {new Date().getFullYear()} طرب‌گارد —{" "}
+              {meta?.is_synthetic
+                ? "نسخه نمایشی با داده مصنوعی."
+                : "پشتیبانی‌شده با دیتاست Torob."}
             </p>
             <p>طراحی‌شده برای کاربران فارسی‌زبان در تهران.</p>
           </div>
