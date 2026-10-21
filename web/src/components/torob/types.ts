@@ -75,6 +75,14 @@ export interface CompareOffer {
     lat: number | null;
     lon: number | null;
     supports_fast_delivery: boolean | null;
+    contacts: { channel: string; display_number: string }[] | null;
+    weekly_hours: string | null;
+    payment_options: string | null;
+    has_installment: boolean;
+    open_now: boolean | null;
+    today_hours: { status: string; open: string; close: string } | null;
+    website_url: string | null;
+    instagram: string | null;
     distance_km: number | null;
   };
 }
@@ -101,8 +109,12 @@ export interface ShopItem {
   supports_fast_delivery: boolean | null;
   website_url: string | null;
   instagram: string | null;
+  contacts: { channel: string; display_number: string }[] | null;
   weekly_hours: string | null;
   payment_options: string | null;
+  has_installment: boolean;
+  open_now: boolean | null;
+  today_hours: { status: string; open: string; close: string } | null;
   matching_offers: number;
   best_price_toman: number | null;
   distance_km: number | null;

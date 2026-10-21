@@ -44,6 +44,8 @@ export interface Filters {
   near?: [number, number] | null;
   radius_km?: number | null;
   fast_delivery?: boolean | null;
+  installment_only?: boolean | null;
+  open_now?: boolean | null;
   sort?: "relevance" | "price_asc" | "price_desc" | "distance" | "matching_offers";
   limit?: number;
   offset?: number;
@@ -58,6 +60,8 @@ export function defaultFilters(f?: Filters): RequiredExcept<Filters> {
     near: f?.near ?? null,
     radius_km: f?.radius_km ?? null,
     fast_delivery: f?.fast_delivery ?? null,
+    installment_only: f?.installment_only ?? null,
+    open_now: f?.open_now ?? null,
     sort: f?.sort ?? "relevance",
     limit: f?.limit ?? 20,
     offset: f?.offset ?? 0,
@@ -132,6 +136,90 @@ function allImages(raw: string | null | undefined): string[] {
 
 function boolOrNull(v: number | null): boolean | null {
   return v === null || v === undefined ? null : Boolean(v);
+}
+
+// --- shop enrichment helpers (Tehran / Asia timezone) ----------------------
+// weekly_hours JSON: { "sat": {"status":"declared","shifts":[{"start_time":"10:00:00","end_time":"19:00:00"}]}, ... }
+// Returns today's status and shift window, with the timezone set to Asia/Tehran.
+
+const DAY_KEYS = ["sat", "sun", "mon", "tue", "wed", "thu", "fri"] as const;
+type DayKey = (typeof DAY_KEYS)[number];
+
+function tehranNow(): Date {
+  // Asia/Tehran is UTC+3:30 with no DST since 2022.
+  const now = new Date();
+  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+  return new Date(utcMs + 3.5 * 3600000);
+}
+
+function todayKey(d = tehranNow()): DayKey {
+  // JS getDay(): 0=Sun..6=Sat. Map to our keys.
+  const map: Record<number, DayKey> = { 6: "sat", 0: "sun", 1: "mon", 2: "tue", 3: "wed", 4: "thu", 5: "fri" };
+  return map[d.getDay()] ?? "sat";
+}
+
+function hhmmToMinutes(t: string | undefined): number | null {
+  if (!t) return null;
+  const m = t.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+function parseTodayHours(
+  weeklyRaw: string | null
+): { status: string; open: string; close: string; isOpen: boolean | null } | null {
+  if (!weeklyRaw) return null;
+  let h: any;
+  try {
+    h = JSON.parse(weeklyRaw);
+  } catch {
+    return null;
+  }
+  if (!h || typeof h !== "object") return null;
+  const key = todayKey();
+  const day = h[key];
+  if (!day) return null;
+  const status = day.status ?? "declared";
+  if (status === "closed") return { status, open: "", close: "", isOpen: false };
+  if (status === "unsupported") return { status, open: "", close: "", isOpen: null };
+  const shift = Array.isArray(day.shifts) && day.shifts.length ? day.shifts[0] : null;
+  if (!shift) return { status, open: "", close: "", isOpen: null };
+  const open = String(shift.start_time ?? "").slice(0, 5);
+  const close = String(shift.end_time ?? "").slice(0, 5);
+  const nowMin = tehranNow().getHours() * 60 + tehranNow().getMinutes();
+  const oMin = hhmmToMinutes(open);
+  const cMin = hhmmToMinutes(close);
+  let isOpen: boolean | null = false;
+  if (oMin === null || cMin === null || (cMin <= oMin && cMin !== 0)) isOpen = null;
+  else if (cMin === 0) isOpen = nowMin >= oMin; // open-ended (end_time 00:00:00 means open rest of day)
+  else isOpen = nowMin >= oMin && nowMin < cMin;
+  return { status, open, close, isOpen };
+}
+
+function hasInstallment(paymentRaw: string | null): boolean {
+  if (!paymentRaw) return false;
+  let p: any;
+  try {
+    p = JSON.parse(paymentRaw);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(p)) return false;
+  return p.some((x: any) => x && typeof x.provider_name === "string" && x.provider_name.length > 0);
+}
+
+function parseContacts(contactsRaw: string | null): { channel: string; display_number: string }[] | null {
+  if (!contactsRaw) return null;
+  let c: any;
+  try {
+    c = JSON.parse(contactsRaw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(c)) return null;
+  return c
+    .filter((x: any) => x && typeof x.channel === "string" && typeof x.display_number === "string")
+    .map((x: any) => ({ channel: x.channel, display_number: x.display_number }));
 }
 
 // --- ShoppingTools --------------------------------------------------------
@@ -395,7 +483,8 @@ export class ShoppingTools {
         SELECT o.offer_id, o.price_toman, o.price_status, o.price_changed_at,
                o.seller_title, o.description, o.warranty,
                s.shop_id, s.name AS shop_name, s.address, s.location_label,
-               s.lat, s.lon, s.supports_fast_delivery
+               s.lat, s.lon, s.supports_fast_delivery, s.contacts,
+               s.weekly_hours, s.payment_options, s.website_url, s.instagram
         FROM offers o JOIN shops s ON s.shop_id = o.shop_id
         WHERE o.product_id = ? ${conds}
         ORDER BY (o.price_status != 'ok'), o.price_toman ASC
@@ -408,6 +497,7 @@ export class ShoppingTools {
       let d: number | null = null;
       if (f.near && r.lat !== null) d = Math.round(haversineKm(f.near, [r.lat, r.lon]) * 100) / 100;
       if (f.near && f.radius_km !== null && (d === null || d > f.radius_km)) continue;
+      const today = parseTodayHours(r.weekly_hours);
       offers.push({
         offer_id: r.offer_id,
         price_toman: r.price_toman ?? null,
@@ -424,6 +514,14 @@ export class ShoppingTools {
           lat: r.lat ?? null,
           lon: r.lon ?? null,
           supports_fast_delivery: boolOrNull(r.supports_fast_delivery),
+          contacts: parseContacts(r.contacts),
+          weekly_hours: r.weekly_hours ?? null,
+          payment_options: r.payment_options ?? null,
+          has_installment: hasInstallment(r.payment_options),
+          open_now: today?.isOpen ?? null,
+          today_hours: today ? { status: today.status, open: today.open, close: today.close } : null,
+          website_url: r.website_url ?? null,
+          instagram: r.instagram ?? null,
           distance_km: d,
         },
       });
@@ -479,7 +577,7 @@ export class ShoppingTools {
       .prepare(
         `
         SELECT s.shop_id, s.name, s.address, s.location_label, s.lat, s.lon,
-               s.supports_fast_delivery, s.website_url, s.instagram,
+               s.supports_fast_delivery, s.website_url, s.instagram, s.contacts,
                s.weekly_hours, s.payment_options,
                COUNT(o.offer_id) AS matching_offers,
                MIN(CASE WHEN o.price_status = 'ok' THEN o.price_toman END) AS best_price_toman
@@ -497,6 +595,11 @@ export class ShoppingTools {
       let d: number | null = null;
       if (f.near && r.lat !== null) d = Math.round(haversineKm(f.near, [r.lat, r.lon]) * 100) / 100;
       if (f.near && f.radius_km !== null && (d === null || d > f.radius_km)) continue;
+      const installment = hasInstallment(r.payment_options);
+      if (f.installment_only && !installment) continue;
+      const today = parseTodayHours(r.weekly_hours);
+      const openNow = today?.isOpen ?? null;
+      if (f.open_now && openNow !== true) continue;
       shops.push({
         shop_id: r.shop_id,
         name: r.name,
@@ -507,8 +610,12 @@ export class ShoppingTools {
         supports_fast_delivery: boolOrNull(r.supports_fast_delivery),
         website_url: r.website_url ?? null,
         instagram: r.instagram ?? null,
+        contacts: parseContacts(r.contacts),
         weekly_hours: r.weekly_hours ?? null,
         payment_options: r.payment_options ?? null,
+        has_installment: installment,
+        open_now: openNow,
+        today_hours: today ? { status: today.status, open: today.open, close: today.close } : null,
         matching_offers: r.matching_offers ?? 0,
         best_price_toman: r.best_price_toman ?? null,
         distance_km: d,
@@ -689,6 +796,14 @@ export interface Offer {
     lat: number | null;
     lon: number | null;
     supports_fast_delivery: boolean | null;
+    contacts: { channel: string; display_number: string }[] | null;
+    weekly_hours: string | null;
+    payment_options: string | null;
+    has_installment: boolean;
+    open_now: boolean | null;
+    today_hours: { status: string; open: string; close: string } | null;
+    website_url: string | null;
+    instagram: string | null;
     distance_km: number | null;
   };
 }
@@ -713,8 +828,12 @@ export interface Shop {
   supports_fast_delivery: boolean | null;
   website_url: string | null;
   instagram: string | null;
+  contacts: { channel: string; display_number: string }[] | null;
   weekly_hours: string | null;
   payment_options: string | null;
+  has_installment: boolean;
+  open_now: boolean | null;
+  today_hours: { status: string; open: string; close: string } | null;
   matching_offers: number;
   best_price_toman: number | null;
   distance_km: number | null;

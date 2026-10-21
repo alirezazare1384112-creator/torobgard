@@ -36,6 +36,8 @@ export function parseFilters(sp: URLSearchParams): Filters {
     near: loc,
     radius_km: num(sp.get("radius_km")),
     fast_delivery: bool(sp.get("fast_delivery")),
+    installment_only: bool(sp.get("installment_only")),
+    open_now: bool(sp.get("open_now")),
     sort: (sp.get("sort") as Filters["sort"]) || "relevance",
     limit: Number(sp.get("limit") ?? 20),
     offset: Number(sp.get("offset") ?? 0),

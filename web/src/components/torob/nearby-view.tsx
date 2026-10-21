@@ -5,10 +5,13 @@ import { motion } from "framer-motion";
 import {
   AlertCircle,
   ArrowRight,
+  Clock,
+  CreditCard,
   LocateFixed,
   MapPin,
   Navigation,
   Package,
+  Phone,
   Search,
   Store,
   Zap,
@@ -18,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { SyntheticNameBadge } from "./disclaimers";
 import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
 import type { CompareOffer, CompareResponse, SearchItem, SearchResponse } from "./types";
@@ -37,12 +41,32 @@ const EXAMPLE_QUERIES = [
 
 type Loc = { lat: number; lon: number; label: string } | null;
 
+/** Human label for today's hours / open status from the backend. */
+function todayStatus(o: CompareOffer["shop"]): { label: string; tone: "open" | "closed" | "unknown" } {
+  const t = o.today_hours;
+  if (!t) return { label: "ساعت کاری نامشخص", tone: "unknown" };
+  if (o.open_now === true) {
+    return t.close
+      ? { label: `باز • تا ${toPersianDigits(t.close)}`, tone: "open" }
+      : { label: "باز", tone: "open" };
+  }
+  if (o.open_now === false) {
+    if (t.status === "closed") return { label: "امروز تعطیل", tone: "closed" };
+    return t.open
+      ? { label: `بسته • از ${toPersianDigits(t.open)}`, tone: "closed" }
+      : { label: "اکنون بسته", tone: "closed" };
+  }
+  return { label: "ساعت کاری نامشخص", tone: "unknown" };
+}
+
 export function NearbyView() {
   const [query, setQuery] = React.useState("");
   const [loc, setLoc] = React.useState<Loc>(null);
   const [locError, setLocError] = React.useState<string | null>(null);
   const [locating, setLocating] = React.useState(false);
   const [radius, setRadius] = React.useState(10); // km
+  const [installmentOnly, setInstallmentOnly] = React.useState(false);
+  const [openNow, setOpenNow] = React.useState(false);
 
   // search state
   const [searching, setSearching] = React.useState(false);
@@ -85,7 +109,6 @@ export function NearbyView() {
   };
 
   const setNeighborhood = (n: string) => {
-    // approximate coords for the 6 supported neighborhoods (same as backend)
     const coords: Record<string, [number, number]> = {
       "صادقیه": [35.7467, 51.336],
       "ولنجک": [35.779, 51.387],
@@ -107,7 +130,6 @@ export function NearbyView() {
     setOffers([]);
     setSearching(true);
     const sp = new URLSearchParams({ q, limit: "40", sort: "relevance" });
-    // apply budget from query is handled by the backend parseQuery
     fetch(`/api/search?${sp.toString()}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((j: SearchResponse) => {
@@ -119,7 +141,7 @@ export function NearbyView() {
   };
 
   // ---- compare offers near location ----
-  const loadOffers = (item: SearchItem) => {
+  const loadOffers = React.useCallback((item: SearchItem) => {
     setSelected(item);
     setOffers([]);
     setOffersError(null);
@@ -135,16 +157,24 @@ export function NearbyView() {
       sort: "distance",
       limit: "50",
     });
+    if (installmentOnly) sp.set("installment_only", "true");
+    if (openNow) sp.set("open_now", "true");
     fetch(`/api/compare/${item.product_id}?${sp.toString()}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((j: CompareResponse) => {
         setOffers(j.offers);
         if (j.offers.length === 0)
-          setOffersError("هیچ فروشگاهی در این شعور این کالا را ندارد. شعور را زیاد کنید.");
+          setOffersError("هیچ فروشگاهی در این شعور این کالا را ندارد. شعور را زیاد کنید یا فیلترها را loosen کنید.");
       })
       .catch((e) => setOffersError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoadingOffers(false));
-  };
+  }, [loc, radius, installmentOnly, openNow]);
+
+  // reload offers when filters change if a product is selected
+  React.useEffect(() => {
+    if (selected) loadOffers(selected);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loc, radius, installmentOnly, openNow]);
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:py-8">
@@ -154,7 +184,8 @@ export function NearbyView() {
           خرید حضوری
         </h2>
         <p className="text-sm text-muted-foreground">
-          بگو چی می‌خوای، موقعیتت رو مشخص کن، بعد ببین کدوم فروشگاه‌های نزدیک این کالا رو دارن.
+          بگو چی می‌خوای، موقعیتت رو مشخص کن، بعد ببین کدوم فروشگاه‌های نزدیک این کالا رو دارن —
+          با قیمت، فاصله، ساعت کاری امروز و شماره تماس.
         </p>
       </header>
 
@@ -211,17 +242,11 @@ export function NearbyView() {
           کجایی؟
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="default"
-            onClick={detectLocation}
-            disabled={locating}
-            className="min-h-11 gap-2"
-          >
+          <Button type="button" variant="default" onClick={detectLocation} disabled={locating} className="min-h-11 gap-2">
             <LocateFixed className="size-4" aria-hidden />
             {locating ? "در حال یافتن..." : "موقعیت من"}
           </Button>
-          <span className="text-xs text-muted-foreground">یا یک محله انتخاب کن:</span>
+          <span className="text-xs text-muted-foreground">یا یک محله:</span>
           {NEIGHBORHOODS.map((n) => (
             <button
               key={n}
@@ -253,19 +278,32 @@ export function NearbyView() {
           </p>
         )}
         {loc && (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <label htmlFor="radius">شعور جست‌وجو:</label>
-            <select
-              id="radius"
-              value={radius}
-              onChange={(e) => setRadius(Number(e.target.value))}
-              className="rounded-md border border-border bg-card px-2 py-1"
-            >
-              <option value={5}>۵ کیلومتر</option>
-              <option value={10}>۱۰ کیلومتر</option>
-              <option value={20}>۲۰ کیلومتر</option>
-              <option value={50}>۵۰ کیلومتر</option>
-            </select>
+          <div className="flex flex-wrap items-center gap-4 text-xs">
+            <label className="flex items-center gap-2">
+              <span className="text-muted-foreground">شعور:</span>
+              <select
+                value={radius}
+                onChange={(e) => setRadius(Number(e.target.value))}
+                className="rounded-md border border-border bg-card px-2 py-1"
+              >
+                <option value={5}>۵ کیلومتر</option>
+                <option value={10}>۱۰ کیلومتر</option>
+                <option value={20}>۲۰ کیلومتر</option>
+                <option value={50}>۵۰ کیلومتر</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              <Switch checked={installmentOnly} onCheckedChange={setInstallmentOnly} aria-label="فقط فروشگاه‌های قسطی" />
+              <span className="flex items-center gap-1">
+                <CreditCard className="size-3.5" aria-hidden /> فقط قسطی
+              </span>
+            </label>
+            <label className="flex items-center gap-2">
+              <Switch checked={openNow} onCheckedChange={setOpenNow} aria-label="فقط فروشگاه‌های باز" />
+              <span className="flex items-center gap-1">
+                <Clock className="size-3.5" aria-hidden /> فقط باز الآن
+              </span>
+            </label>
           </div>
         )}
       </Card>
@@ -342,9 +380,16 @@ export function NearbyView() {
       {/* Step 4: Nearby shops for the selected product */}
       {selected && (
         <Card className="gap-3 p-4 sm:p-5">
-          <div className="flex items-center gap-2 text-sm font-semibold">
-            <span className="flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs">۴</span>
-            نزدیک‌ترین فروشگاه‌ها برای «{selected.title}»
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <span className="flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs">۴</span>
+              نزدیک‌ترین فروشگاه‌ها برای «{selected.title}»
+            </div>
+            {offers.length > 0 && (
+              <span className="text-xs text-muted-foreground">
+                {toPersianDigits(offers.length)} فروشگاه
+              </span>
+            )}
           </div>
           {!loc && (
             <p className="flex items-start gap-2 text-sm text-amber-600">
@@ -355,7 +400,7 @@ export function NearbyView() {
           {loadingOffers && (
             <div className="grid gap-2">
               {Array.from({ length: 3 }).map((_, i) => (
-                <Skeleton key={i} className="h-24 w-full" />
+                <Skeleton key={i} className="h-28 w-full" />
               ))}
             </div>
           )}
@@ -364,49 +409,79 @@ export function NearbyView() {
           )}
           {offers.length > 0 && !loadingOffers && (
             <motion.ul initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="grid gap-2">
-              {offers.map((o, idx) => (
-                <li key={o.offer_id}>
-                  <div className="flex items-start gap-3 rounded-lg border border-border bg-card p-3">
-                    <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 font-num text-sm font-semibold text-primary">
-                      {toPersianDigits(idx + 1)}
-                    </span>
-                    <div className="flex min-w-0 flex-1 flex-col gap-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Store className="size-4 text-primary" aria-hidden />
-                        <span className="line-clamp-1 text-sm font-semibold">{o.shop.name}</span>
-                        <SyntheticNameBadge />
-                        {o.shop.supports_fast_delivery && (
-                          <Badge className="gap-1 bg-emerald-600 text-white hover:bg-emerald-600">
-                            <Zap className="size-3" aria-hidden />
-                            ارسال سریع
+              {offers.map((o, idx) => {
+                const st = todayStatus(o.shop);
+                const phone = o.shop.contacts?.find((c) => c.channel === "phone")?.display_number;
+                return (
+                  <li key={o.offer_id}>
+                    <div className="flex items-start gap-3 rounded-lg border border-border bg-card p-3">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 font-num text-sm font-semibold text-primary">
+                        {toPersianDigits(idx + 1)}
+                      </span>
+                      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Store className="size-4 text-primary" aria-hidden />
+                          <span className="line-clamp-1 text-sm font-semibold">{o.shop.name}</span>
+                          <SyntheticNameBadge />
+                          {o.shop.supports_fast_delivery && (
+                            <Badge className="gap-1 bg-emerald-600 text-white hover:bg-emerald-600">
+                              <Zap className="size-3" aria-hidden />
+                              ارسال سریع
+                            </Badge>
+                          )}
+                          {o.shop.has_installment && (
+                            <Badge className="gap-1 bg-amber-600 text-white hover:bg-amber-600">
+                              <CreditCard className="size-3" aria-hidden />
+                              قسطی
+                            </Badge>
+                          )}
+                          <Badge
+                            variant={st.tone === "open" ? "default" : st.tone === "closed" ? "destructive" : "secondary"}
+                            className="gap-1"
+                          >
+                            <Clock className="size-3" aria-hidden />
+                            {st.label}
                           </Badge>
+                        </div>
+                        {o.shop.address && (
+                          <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                            <MapPin className="mt-0.5 size-3 shrink-0" aria-hidden />
+                            <span className="leading-relaxed">{o.shop.address}</span>
+                          </p>
                         )}
-                      </div>
-                      {o.shop.address && (
-                        <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
-                          <MapPin className="mt-0.5 size-3 shrink-0" aria-hidden />
-                          <span className="leading-relaxed">{o.shop.address}</span>
-                        </p>
-                      )}
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        {o.price_status === "ok" && o.price_toman !== null ? (
-                          <span className="font-num font-semibold text-primary">
-                            {formatToman(o.price_toman)}
-                          </span>
-                        ) : (
-                          <span className="text-muted-foreground">قیمت نامشخص</span>
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          {o.price_status === "ok" && o.price_toman !== null ? (
+                            <span className="font-num font-semibold text-primary">
+                              {formatToman(o.price_toman)}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">قیمت نامشخص</span>
+                          )}
+                          {o.shop.distance_km !== null && (
+                            <Badge variant="secondary" className="font-num">
+                              {formatDistanceKm(o.shop.distance_km)}
+                            </Badge>
+                          )}
+                          {o.shop.location_label && <Badge variant="outline">{o.shop.location_label}</Badge>}
+                        </div>
+                        {phone && (
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <a href={`tel:${phone.replace(/\s/g, "")}`}>
+                              <Button type="button" variant="outline" size="sm" className="h-9 gap-1.5">
+                                <Phone className="size-3.5" aria-hidden />
+                                تماس: {toPersianDigits(phone)}
+                              </Button>
+                            </a>
+                            <span className="text-[11px] text-amber-600">
+                              قیمت‌ها ممکن است قدیمی باشند — قبل از مراجعه تماس بگیرید و موجودی را بپرسید.
+                            </span>
+                          </div>
                         )}
-                        {o.shop.distance_km !== null && (
-                          <Badge variant="secondary" className="font-num">
-                            {formatDistanceKm(o.shop.distance_km)}
-                          </Badge>
-                        )}
-                        {o.shop.location_label && <Badge variant="outline">{o.shop.location_label}</Badge>}
                       </div>
                     </div>
-                  </div>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </motion.ul>
           )}
         </Card>
