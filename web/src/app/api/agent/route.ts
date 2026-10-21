@@ -27,7 +27,10 @@ function extractJson(text: string): ToolCall | null {
 }
 
 function asFilters(args: Record<string, any>): Filters {
-  const near = args.near ? resolveLocation(String(args.near)) : null;
+  const nearText = args.near ? resolveLocation(String(args.near)) : null;
+  const lat = typeof args.lat === "number" ? args.lat : null;
+  const lon = typeof args.lon === "number" ? args.lon : null;
+  const near = nearText ?? (lat !== null && lon !== null ? [lat, lon] as [number, number] : null);
   return {
     min_price: typeof args.min_price === "number" ? args.min_price : null,
     max_price: typeof args.max_price === "number" ? args.max_price : null,
@@ -36,6 +39,8 @@ function asFilters(args: Record<string, any>): Filters {
     near,
     radius_km: typeof args.radius_km === "number" ? args.radius_km : null,
     fast_delivery: typeof args.fast_delivery === "boolean" ? args.fast_delivery : null,
+    installment_only: typeof args.installment_only === "boolean" ? args.installment_only : null,
+    open_now: null,
     sort: (args.sort as Filters["sort"]) || "relevance",
     limit: typeof args.limit === "number" ? args.limit : 20,
     offset: typeof args.offset === "number" ? args.offset : 0,

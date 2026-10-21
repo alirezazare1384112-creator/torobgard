@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import {
   AlertCircle,
   ArrowRight,
+  ExternalLink,
   LocateFixed,
   MapPin,
   Navigation,
@@ -12,23 +13,26 @@ import {
   Store,
   Trash2,
   Truck,
+  Wallet,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useCart } from "./cart-store";
 import { SyntheticNameBadge } from "./disclaimers";
 import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
 import type { SearchItem, SearchResponse } from "./types";
 
 /**
- * "برنامهٔ خرید" view — multi-stop in-person trip planning.
+ * "برنامهٔ خرید" — multi-stop in-person trip planning.
  *
- * The user builds a shopping list (search + add items), sets a start point
- * (geolocation or neighborhood), and we call /api/trip to get a greedy
- * shop-coverage plan. We render the stops in order with a schematic route
- * line connecting them on a small SVG map.
+ * Reads the shared cart (products the user added from search). The user sets a
+ * start point (geolocation or neighborhood), we call /api/trip for a greedy
+ * shop-coverage plan, then render stops in order with a schematic route, the
+ * total price across all stops, and a per-stop Google Maps directions link
+ * (opens the route to that shop's coordinates) plus the straight-line distance.
  */
 
 interface TripStop {
@@ -46,9 +50,7 @@ interface TripStop {
   straight_line_distance_km_from_start: number | null;
 }
 
-const NEIGHBORHOODS = [
-  "صادقیه", "ولنجک", "ونک", "میدان ولیعصر", "تجریش", "شریعتی",
-] as const;
+const NEIGHBORHOODS = ["صادقیه", "ولنجک", "ونک", "میدان ولیعصر", "تجریش", "شریعتی"] as const;
 const NB_COORDS: Record<string, [number, number]> = {
   "صادقیه": [35.7467, 51.336], "ولنجک": [35.779, 51.387], "ونک": [35.765, 51.412],
   "میدان ولیعصر": [35.6997, 51.413], "تجریش": [35.805, 51.43], "شریعتی": [35.76, 51.433],
@@ -60,11 +62,21 @@ const VB_W = 600, VB_H = 500, PAD = 30;
 function lonToX(lon: number) { return PAD + ((lon - LON_MIN) / (LON_MAX - LON_MIN)) * (VB_W - 2 * PAD); }
 function latToY(lat: number) { return PAD + ((LAT_MAX - lat) / (LAT_MAX - LAT_MIN)) * (VB_H - 2 * PAD); }
 
+/** Google Maps directions URL from start to a destination lat/lon. */
+function gmapsDirectionsUrl(from: { lat: number; lon: number } | null, to: { lat: number; lon: number }): string {
+  const dest = `${to.lat},${to.lon}`;
+  if (from) return `https://www.google.com/maps/dir/?api=1&origin=${from.lat},${from.lon}&destination=${dest}&travelmode=driving`;
+  return `https://www.google.com/maps/search/?api=1&query=${dest}`;
+}
+
 export function TripView() {
+  const cartItems = useCart((s) => s.items);
+  const removeFromCart = useCart((s) => s.remove);
+  const clearCart = useCart((s) => s.clear);
+
   const [query, setQuery] = React.useState("");
   const [results, setResults] = React.useState<SearchItem[] | null>(null);
   const [searching, setSearching] = React.useState(false);
-  const [list, setList] = React.useState<SearchItem[]>([]);
   const [loc, setLoc] = React.useState<{ lat: number; lon: number; label: string } | null>(null);
   const [locating, setLocating] = React.useState(false);
   const [maxShops, setMaxShops] = React.useState(3);
@@ -97,14 +109,14 @@ export function TripView() {
   };
 
   const runPlan = () => {
-    if (list.length === 0) return;
+    if (cartItems.length === 0) return;
     setPlanning(true);
     setPlanError(null);
     fetch("/api/trip", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        items: list.map((i) => ({ product_id: i.product_id })),
+        items: cartItems.map((i) => ({ product_id: i.product_id })),
         start: loc ? { lat: loc.lat, lon: loc.lon } : undefined,
         max_shops: maxShops,
       }),
@@ -115,8 +127,46 @@ export function TripView() {
       .finally(() => setPlanning(false));
   };
 
-  // stops with valid coords for the schematic map
-  const mappedStops = (plan ?? []).filter((s) => s.shop.lat !== null && s.shop.lon !== null);
+  // product_id -> title lookup from the cart so we can show item names in stops
+  const titleById = React.useMemo(() => {
+    const m: Record<string, string> = {};
+    cartItems.forEach((i) => { m[i.product_id] = i.title; });
+    return m;
+  }, [cartItems]);
+
+  // total across all stops
+  const grandTotal = (plan ?? []).reduce((s, p) => s + p.subtotal_toman, 0);
+
+  // Order stops by nearest-neighbor from start (so the route is the best path,
+  // not just the greedy shop-coverage order the backend returns).
+  const orderedPlan = React.useMemo(() => {
+    if (!plan || plan.length === 0) return [];
+    const withCoords = plan.filter((s) => s.shop.lat !== null && s.shop.lon !== null);
+    if (withCoords.length === 0) return plan;
+    const remaining = [...plan];
+    const ordered: typeof plan = [];
+    let cur: [number, number] | null = loc ? [loc.lat, loc.lon] : null;
+    while (remaining.length) {
+      if (!cur) { ordered.push(...remaining); break; }
+      let bestIdx = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < remaining.length; i++) {
+        const s = remaining[i];
+        if (s.shop.lat === null || s.shop.lon === null) continue;
+        const d = Math.hypot(s.shop.lat - cur[0], s.shop.lon - cur[1]);
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      }
+      const [pickedStop] = remaining.splice(bestIdx, 1);
+      ordered.push(pickedStop);
+      if (pickedStop.shop.lat !== null && pickedStop.shop.lon !== null) {
+        cur = [pickedStop.shop.lat!, pickedStop.shop.lon!];
+      }
+    }
+    return ordered;
+  }, [plan, loc]);
+
+  // schematic route points (use the ordered plan)
+  const mappedStops = orderedPlan.filter((s) => s.shop.lat !== null && s.shop.lon !== null);
   const points = [
     loc ? { x: lonToX(loc.lon), y: latToY(loc.lat), label: loc.label, isStart: true } : null,
     ...mappedStops.map((s) => ({ x: lonToX(s.shop.lon!), y: latToY(s.shop.lat!), label: s.shop.name, isStart: false })),
@@ -130,52 +180,66 @@ export function TripView() {
           <Route className="size-5" aria-hidden />برنامهٔ خرید
         </h2>
         <p className="text-sm text-muted-foreground">
-          چند محصول را اضافه کن، موقعیتت را مشخص کن، و ببین می‌توانی همه را در چند توقف بخری.
-          مسیر شماتیک است، نه مسیریابی واقعی.
+          محصول‌هایی که از جست‌وجو اضافه کردی اینجا جمع می‌شوند. موقعیتت را مشخص کن، برنامه را بساز،
+          و برای هر توقف مسیر رسیدن در گوگل مپ و فاصله را ببین. مسیر روی نقشه شماتیک است (فاصلهٔ هوایی)،
+          ولی لینک مپ واقعی است.
         </p>
       </header>
 
-      {/* Build the list */}
+      {/* Cart (items added from search) */}
       <Card className="gap-3 p-4">
-        <div className="flex items-center gap-2 text-sm font-semibold">۱. محصولات موردنظر</div>
-        <form onSubmit={(e) => { e.preventDefault(); search(query); }} className="flex gap-2">
-          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="مثلاً: ماوس بی سیم" className="text-base" aria-label="جست‌وجوی محصول" />
-          <Button type="submit" disabled={!query.trim() || searching} className="min-h-11 gap-2">جست‌وجو</Button>
-        </form>
-        {searching && <Skeleton className="h-20 w-full" />}
-        {results && !searching && (
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {results.slice(0, 9).map((r) => {
-              const inList = list.some((x) => x.product_id === r.product_id);
-              return (
-                <button key={r.product_id} type="button" onClick={() => setList((l) => inList ? l.filter((x) => x.product_id !== r.product_id) : [...l, r])} className={`flex items-start gap-2 rounded-lg border p-2 text-right text-xs transition-colors ${inList ? "border-primary bg-primary/5" : "border-border hover:bg-accent"}`}>
-                  {r.image_url ? <img src={r.image_url} alt="" className="size-9 shrink-0 rounded object-cover" loading="lazy" /> : <span className="flex size-9 shrink-0 items-center justify-center rounded bg-muted"><Store className="size-4 text-muted-foreground" aria-hidden /></span>}
-                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="line-clamp-2 font-medium leading-snug">{r.title}</span>
-                    <span className="text-muted-foreground">{r.brand ?? "بدون برند"} • {r.min_price_toman !== null ? formatToman(r.min_price_toman) : "نامشخص"}</span>
-                  </span>
-                  {inList && <Badge variant="default" className="shrink-0">در لیست</Badge>}
-                </button>
-              );
-            })}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <Wallet className="size-4" aria-hidden />سبد خرید ({toPersianDigits(cartItems.length)})
           </div>
-        )}
-        {list.length > 0 && (
+          {cartItems.length > 0 && (
+            <Button type="button" variant="ghost" size="sm" className="h-8" onClick={clearCart}>پاک کردن سبد</Button>
+          )}
+        </div>
+        {cartItems.length === 0 ? (
+          <p className="rounded-md bg-muted/40 p-3 text-xs text-muted-foreground">
+            هنوز محصولی اضافه نکردی. از تب «جست‌وجو» محصول‌ها را پیدا کن و «افزودن به برنامهٔ خرید» را بزن.
+          </p>
+        ) : (
           <div className="flex flex-wrap gap-1.5">
-            {list.map((i) => (
-              <Badge key={i.product_id} variant="secondary" className="gap-1">
-                <span className="line-clamp-1 max-w-40">{i.title}</span>
-                <button type="button" onClick={() => setList((l) => l.filter((x) => x.product_id !== i.product_id))} aria-label="حذف"><Trash2 className="size-3" aria-hidden /></button>
+            {cartItems.map((i) => (
+              <Badge key={i.product_id} variant="secondary" className="gap-1 py-1.5">
+                <span className="line-clamp-1 max-w-48">{i.title}</span>
+                {i.min_price_toman !== null && <span className="font-num text-muted-foreground">• {formatToman(i.min_price_toman)}</span>}
+                <button type="button" onClick={() => removeFromCart(i.product_id)} aria-label="حذف از سبد" className="mr-0.5"><Trash2 className="size-3" aria-hidden /></button>
               </Badge>
             ))}
-            <span className="text-xs text-muted-foreground">{toPersianDigits(list.length)} محصول</span>
           </div>
         )}
+
+        {/* quick add by search (optional) */}
+        <details className="mt-1">
+          <summary className="cursor-pointer text-xs text-muted-foreground">+ افزودن سریع با جست‌وجو</summary>
+          <form onSubmit={(e) => { e.preventDefault(); search(query); }} className="mt-2 flex gap-2">
+            <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="مثلاً: ماوس بی سیم" className="text-sm" aria-label="جست‌وجوی محصول" />
+            <Button type="submit" size="sm" disabled={!query.trim() || searching} className="min-h-9">جست‌وجو</Button>
+          </form>
+          {searching && <Skeleton className="mt-2 h-16 w-full" />}
+          {results && !searching && (
+            <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+              {results.slice(0, 6).map((r) => {
+                const inCart = cartItems.some((x) => x.product_id === r.product_id);
+                return (
+                  <button key={r.product_id} type="button" onClick={() => !inCart && useCart.getState().add(r)} disabled={inCart} className={`flex items-center gap-2 rounded-md border p-1.5 text-right text-xs transition-colors ${inCart ? "border-primary/40 bg-primary/5 opacity-70" : "border-border hover:bg-accent"}`}>
+                    {r.image_url ? <img src={r.image_url} alt="" className="size-7 rounded object-cover" loading="lazy" /> : <span className="flex size-7 items-center justify-center rounded bg-muted"><Store className="size-3.5 text-muted-foreground" aria-hidden /></span>}
+                    <span className="flex min-w-0 flex-1 flex-col"><span className="line-clamp-1">{r.title}</span><span className="text-muted-foreground">{r.min_price_toman !== null ? formatToman(r.min_price_toman) : "نامشخص"}</span></span>
+                    {inCart && <Badge variant="secondary" className="text-[10px]">افزوده شد</Badge>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </details>
       </Card>
 
-      {/* Location + plan */}
+      {/* Start + plan */}
       <Card className="gap-3 p-4">
-        <div className="flex items-center gap-2 text-sm font-semibold">۲. نقطهٔ شروع و برنامه‌ریزی</div>
+        <div className="flex items-center gap-2 text-sm font-semibold">نقطهٔ شروع و برنامه‌ریزی</div>
         <div className="flex flex-wrap items-center gap-2">
           <Button type="button" onClick={detect} disabled={locating} className="min-h-11 gap-2"><LocateFixed className="size-4" aria-hidden />{locating ? "..." : "موقعیت من"}</Button>
           {NEIGHBORHOODS.map((n) => (
@@ -190,16 +254,20 @@ export function TripView() {
             </select>
           </label>
         </div>
-        <Button type="button" onClick={runPlan} disabled={list.length === 0 || planning} className="min-h-11 gap-2"><Navigation className="size-4" aria-hidden />{planning ? "در حال برنامه‌ریزی…" : "برنامه بساز"}</Button>
+        <Button type="button" onClick={runPlan} disabled={cartItems.length === 0 || planning} className="min-h-11 gap-2"><Navigation className="size-4" aria-hidden />{planning ? "در حال برنامه‌ریزی…" : "برنامه بساز"}</Button>
         {planError && <p className="flex items-start gap-2 text-sm text-destructive"><AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden />{planError}</p>}
       </Card>
 
       {/* Plan result */}
       {plan && !planning && (
         <Card className="gap-3 p-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-sm font-semibold">۳. برنامهٔ پیشنهادی ({toPersianDigits(plan.length)} توقف)</div>
-            {plan.length > 0 && <span className="text-xs text-muted-foreground">مجموع: {formatToman(plan.reduce((s, p) => s + p.subtotal_toman, 0))}</span>}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-semibold">برنامهٔ پیشنهادی ({toPersianDigits(plan.length)} توقف)</div>
+            {plan.length > 0 && (
+              <Badge variant="default" className="gap-1 font-num text-sm">
+                <Wallet className="size-3.5" aria-hidden />مجموع: {formatToman(grandTotal)}
+              </Badge>
+            )}
           </div>
 
           {plan.length === 0 ? (
@@ -220,30 +288,53 @@ export function TripView() {
                       </g>
                     ))}
                   </svg>
-                  <p className="mt-1 text-[11px] text-muted-foreground">مسیر شماتیک (فاصلهٔ هوایی) — نه مسیریابی واقعی.</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">مسیر شماتیک (فاصلهٔ هوایی) — برای مسیر واقعی از لینک مپ هر توقف استفاده کن.</p>
                 </div>
               )}
 
               <ol className="grid gap-2">
-                {plan.map((stop, idx) => (
-                  <li key={stop.shop.shop_id} className="flex items-start gap-3 rounded-lg border border-border bg-card p-3">
-                    <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 font-num text-sm font-semibold text-primary">{toPersianDigits(idx + 1)}</span>
-                    <div className="flex min-w-0 flex-1 flex-col gap-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Store className="size-4 text-primary" aria-hidden />
-                        <span className="line-clamp-1 text-sm font-semibold">{stop.shop.name}</span>
-                        <SyntheticNameBadge />
+                {orderedPlan.map((stop, idx) => {
+                  const mapsUrl = stop.shop.lat !== null && stop.shop.lon !== null
+                    ? gmapsDirectionsUrl(loc, { lat: stop.shop.lat!, lon: stop.shop.lon! })
+                    : null;
+                  return (
+                    <li key={stop.shop.shop_id} className="flex items-start gap-3 rounded-lg border border-border bg-card p-3">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 font-num text-sm font-semibold text-primary">{toPersianDigits(idx + 1)}</span>
+                      <div className="flex min-w-0 flex-1 flex-col gap-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Store className="size-4 text-primary" aria-hidden />
+                          <span className="line-clamp-1 text-sm font-semibold">{stop.shop.name}</span>
+                          <SyntheticNameBadge />
+                        </div>
+                        {stop.shop.address && <p className="flex items-start gap-1.5 text-xs text-muted-foreground"><MapPin className="mt-0.5 size-3 shrink-0" aria-hidden />{stop.shop.address}</p>}
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <Badge variant="secondary" className="font-num">{toPersianDigits(stop.items.length)} کالا</Badge>
+                          <span className="font-num font-semibold text-primary">{formatToman(stop.subtotal_toman)}</span>
+                          {stop.straight_line_distance_km_from_start !== null && <Badge variant="outline" className="font-num gap-1"><Truck className="size-3" aria-hidden />{formatDistanceKm(stop.straight_line_distance_km_from_start)} از شروع</Badge>}
+                        </div>
+                        {/* items in this stop */}
+                        <ul className="mt-1 flex flex-col gap-0.5 text-[11px] text-muted-foreground">
+                          {stop.items.map((it) => (
+                            <li key={it.product_id} className="flex items-center justify-between gap-2">
+                              <span className="line-clamp-1">{titleById[it.product_id] ?? it.product_id}</span>
+                              <span className="font-num">{it.price_toman !== null ? formatToman(it.price_toman) : "نامشخص"}</span>
+                            </li>
+                          ))}
+                        </ul>
+                        {/* Google Maps link */}
+                        {mapsUrl ? (
+                          <a href={mapsUrl} target="_blank" rel="noopener noreferrer" className="mt-1 inline-flex items-center gap-1.5 self-start rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90">
+                            <Navigation className="size-3.5" aria-hidden />مسیر رسیدن در گوگل مپ
+                            <ExternalLink className="size-3" aria-hidden />
+                          </a>
+                        ) : (
+                          <span className="mt-1 text-[11px] text-amber-600">موقعیت فروشگاه نامشخص — لینک مپ در دسترس نیست.</span>
+                        )}
                       </div>
-                      {stop.shop.address && <p className="flex items-start gap-1.5 text-xs text-muted-foreground"><MapPin className="mt-0.5 size-3 shrink-0" aria-hidden />{stop.shop.address}</p>}
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        <Badge variant="secondary" className="font-num">{toPersianDigits(stop.items.length)} کالا</Badge>
-                        <span className="font-num font-semibold text-primary">{formatToman(stop.subtotal_toman)}</span>
-                        {stop.straight_line_distance_km_from_start !== null && <Badge variant="outline" className="font-num gap-1"><Truck className="size-3" aria-hidden />{formatDistanceKm(stop.straight_line_distance_km_from_start)} از شروع</Badge>}
-                      </div>
-                    </div>
-                    <ArrowRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                  </li>
-                ))}
+                      <ArrowRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                    </li>
+                  );
+                })}
               </ol>
 
               {unmatched.length > 0 && (

@@ -262,6 +262,13 @@ export class ShoppingTools {
     if (f.fast_delivery) {
       conds.push("AND o.shop_id IN (SELECT shop_id FROM shops WHERE supports_fast_delivery = 1)");
     }
+    if (f.installment_only) {
+      // a shop has installment if payment_options JSON has at least one entry
+      // with a non-empty provider_name (اسنپ‌پی/ترب‌پی/دیجی‌پی per the dataset)
+      conds.push(
+        "AND o.shop_id IN (SELECT shop_id FROM shops WHERE payment_options IS NOT NULL AND payment_options NOT IN ('[]','') AND payment_options LIKE '%provider_name%')"
+      );
+    }
     if (f.near) {
       const [lat, lon] = f.near;
       const radius = f.radius_km ?? 5.0;
@@ -341,6 +348,27 @@ export class ShoppingTools {
     //   + WHERE terms (termParams) + conn (connParams)
     //   + EXISTS offerConds (offerParams)
     //   + LIMIT, OFFSET
+    // nearest-shop subquery: pick the shop with the lowest valid offer price
+    // for this product (the same shop the min_price comes from). We join on
+    // offers + shops, filter price_status='ok', and ORDER BY price ASC LIMIT 1.
+    const nearSubselect = `
+      (SELECT s.shop_id FROM offers o2
+         JOIN shops s ON s.shop_id = o2.shop_id
+         WHERE o2.product_id = p.product_id AND o2.price_status = 'ok'
+         ORDER BY o2.price_toman ASC LIMIT 1) AS nearest_shop_id,
+      (SELECT s.name FROM offers o2
+         JOIN shops s ON s.shop_id = o2.shop_id
+         WHERE o2.product_id = p.product_id AND o2.price_status = 'ok'
+         ORDER BY o2.price_toman ASC LIMIT 1) AS nearest_shop_name,
+      (SELECT s.lat FROM offers o2
+         JOIN shops s ON s.shop_id = o2.shop_id
+         WHERE o2.product_id = p.product_id AND o2.price_status = 'ok'
+         ORDER BY o2.price_toman ASC LIMIT 1) AS nearest_shop_lat,
+      (SELECT s.lon FROM offers o2
+         JOIN shops s ON s.shop_id = o2.shop_id
+         WHERE o2.product_id = p.product_id AND o2.price_status = 'ok'
+         ORDER BY o2.price_toman ASC LIMIT 1) AS nearest_shop_lon
+    `;
     const rows = this.db
       .prepare(
         `
@@ -348,7 +376,8 @@ export class ShoppingTools {
                (SELECT MIN(o.price_toman) FROM offers o
                   WHERE o.product_id = p.product_id AND o.price_status = 'ok' ${offerConds}) AS min_price,
                (SELECT COUNT(*) FROM offers o WHERE o.product_id = p.product_id ${offerConds}) AS offer_count,
-               p.image_urls
+               p.image_urls,
+               ${nearSubselect}
         FROM products p
         WHERE ${where} ${connClause} ${offerClause}
         LIMIT ? OFFSET ?
@@ -387,6 +416,13 @@ export class ShoppingTools {
           min_price_toman: r.min_price ?? null,
           offer_count: r.offer_count ?? 0,
           image_url: firstImage(r.image_urls),
+          nearest_shop_id: r.nearest_shop_id ?? null,
+          nearest_shop_name: r.nearest_shop_name ?? null,
+          nearest_shop_lat: r.nearest_shop_lat ?? null,
+          nearest_shop_lon: r.nearest_shop_lon ?? null,
+          distance_km: f.near && r.nearest_shop_lat !== null && r.nearest_shop_lon !== null
+            ? Math.round(haversineKm(f.near, [r.nearest_shop_lat, r.nearest_shop_lon]) * 100) / 100
+            : null,
           _norm: norm,
         },
         score,
@@ -916,6 +952,11 @@ export interface SearchItem {
   min_price_toman: number | null;
   offer_count: number;
   image_url: string | null;
+  nearest_shop_name?: string | null;
+  nearest_shop_id?: string | null;
+  nearest_shop_lat?: number | null;
+  nearest_shop_lon?: number | null;
+  distance_km?: number | null;
 }
 export interface SearchResponse {
   status: string;

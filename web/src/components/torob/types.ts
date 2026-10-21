@@ -38,6 +38,10 @@ export interface SearchItem {
   min_price_toman: number | null;
   offer_count: number;
   image_url: string | null;
+  nearest_shop_name?: string | null;
+  nearest_shop_lat?: number | null;
+  nearest_shop_lon?: number | null;
+  distance_km?: number | null;
 }
 
 export interface SearchResponse {

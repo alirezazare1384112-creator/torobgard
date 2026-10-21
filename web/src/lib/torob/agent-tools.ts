@@ -18,7 +18,7 @@ export const TOOL_CATALOG = [
   {
     name: "search_products",
     description:
-      "جست‌وجوی محصول در دیتاست. ورودی: query (مثلا «ماوس بی‌سیم»)، و فیلترهای اختیاری max_price، min_price، brand، category، near (نام محله تهران مثل صادقیه)، radius_km، fast_delivery (bool)، sort (relevance|price_asc|price_desc|distance)، limit، offset.",
+      "جست‌وجوی محصول در دیتاست. ورودی: query (مثلا «ماوس بی‌سیم»)، و فیلترهای اختیاری max_price، min_price، brand، category، near (نام محله تهران مثل صادقیه)، radius_km، fast_delivery (bool)، sort (relevance|price_asc|price_desc|distance)، limit، offset، lat و lon (موقعیت کاربر برای محاسبه فاصله و نمایش نزدیک‌ترین فروشگاه). وقتی می‌خواهی چند محصول را با هم مقایسه کنی، این ابزار را با sort=price_asc یا distance فراخوانی کن و در پاسخت محصولات را از نظر قیمت، برند، تعداد پیشنهاد و نزدیک‌بودن فروشگاه مقایسه کن.",
     args: {
       query: "string (لازم)",
       max_price: "number? (تومان)",
@@ -30,6 +30,8 @@ export const TOOL_CATALOG = [
       fast_delivery: "boolean?",
       sort: "string? (relevance|price_asc|price_desc|distance)",
       limit: "number?",
+      lat: "number? (موقعیت کاربر)",
+      lon: "number? (موقعیت کاربر)",
     },
   },
   {

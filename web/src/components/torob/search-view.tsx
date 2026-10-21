@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { ChevronLeft, ChevronRight, Filter, Loader2, PackageX, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Filter, LocateFixed, Loader2, PackageX, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -14,6 +14,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { formatNumber, toPersianDigits } from "./format";
 import { ProductCard } from "./product-card";
+import { CompareBar } from "./compare-panel";
 import { NEIGHBORHOODS, type Neighborhood, type SearchResponse, type SortOption } from "./types";
 
 export interface SearchFiltersState {
@@ -22,8 +23,10 @@ export interface SearchFiltersState {
   max_price: number | null;
   near: Neighborhood | "all";
   radius_km: number;
-  fast_delivery: boolean;
+  installment_only: boolean;
   sort: SortOption;
+  lat: number | null;
+  lon: number | null;
 }
 
 export const DEFAULT_SEARCH_FILTERS: SearchFiltersState = {
@@ -32,8 +35,10 @@ export const DEFAULT_SEARCH_FILTERS: SearchFiltersState = {
   max_price: null,
   near: "all",
   radius_km: 5,
-  fast_delivery: false,
+  installment_only: false,
   sort: "relevance",
+  lat: null,
+  lon: null,
 };
 
 const PAGE_SIZE = 12;
@@ -50,7 +55,11 @@ function buildUrl(filters: SearchFiltersState, offset: number): string {
     sp.set("near", filters.near);
     sp.set("radius_km", String(filters.radius_km));
   }
-  if (filters.fast_delivery) sp.set("fast_delivery", "1");
+  if (filters.lat !== null && filters.lon !== null) {
+    sp.set("lat", String(filters.lat));
+    sp.set("lon", String(filters.lon));
+  }
+  if (filters.installment_only) sp.set("installment_only", "1");
   return `/api/search?${sp.toString()}`;
 }
 
@@ -69,6 +78,15 @@ function FiltersPanel({
   onChange: (next: SearchFiltersState) => void;
   onApply: () => void;
 }) {
+  const detectLoc = () => {
+    if (!("geolocation" in navigator)) return;
+    navigator.geolocation.getCurrentPosition(
+      (p) => onChange({ ...filters, lat: Number(p.coords.latitude.toFixed(6)), lon: Number(p.coords.longitude.toFixed(6)) }),
+      () => {},
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+    );
+  };
+
   return (
     <Card className="flex flex-col gap-4 p-4">
       <div className="flex items-center gap-2 text-sm font-semibold">
@@ -79,13 +97,8 @@ function FiltersPanel({
       {/* Sort */}
       <div className="flex flex-col gap-1.5">
         <Label htmlFor="sort">ترتیب</Label>
-        <Select
-          value={filters.sort}
-          onValueChange={(v) => onChange({ ...filters, sort: v as SortOption })}
-        >
-          <SelectTrigger id="sort" className="w-full">
-            <SelectValue />
-          </SelectTrigger>
+        <Select value={filters.sort} onValueChange={(v) => onChange({ ...filters, sort: v as SortOption })}>
+          <SelectTrigger id="sort" className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="relevance">مرتبط‌ترین</SelectItem>
             <SelectItem value="price_asc">ارزان‌ترین</SelectItem>
@@ -99,50 +112,27 @@ function FiltersPanel({
       <div className="flex flex-col gap-2">
         <Label>محدوده قیمت (تومان)</Label>
         <div className="grid grid-cols-2 gap-2">
-          <Input
-            type="number"
-            inputMode="numeric"
-            min={0}
-            placeholder="حداقل"
-            value={filters.min_price ?? ""}
-            onChange={(e) => {
-              const v = e.target.value;
-              onChange({ ...filters, min_price: v === "" ? null : Math.max(0, Number(v)) });
-            }}
-            aria-label="حداقل قیمت"
-          />
-          <Input
-            type="number"
-            inputMode="numeric"
-            min={0}
-            placeholder="حداکثر"
-            value={filters.max_price ?? ""}
-            onChange={(e) => {
-              const v = e.target.value;
-              onChange({ ...filters, max_price: v === "" ? null : Math.max(0, Number(v)) });
-            }}
-            aria-label="حداکثر قیمت"
-          />
+          <Input type="number" inputMode="numeric" min={0} placeholder="حداقل" value={filters.min_price ?? ""} onChange={(e) => { const v = e.target.value; onChange({ ...filters, min_price: v === "" ? null : Math.max(0, Number(v)) }); }} aria-label="حداقل قیمت" />
+          <Input type="number" inputMode="numeric" min={0} placeholder="حداکثر" value={filters.max_price ?? ""} onChange={(e) => { const v = e.target.value; onChange({ ...filters, max_price: v === "" ? null : Math.max(0, Number(v)) }); }} aria-label="حداکثر قیمت" />
         </div>
       </div>
 
-      {/* Near */}
+      {/* Location: geolocation + neighborhood */}
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor="near">محله</Label>
-        <Select
-          value={filters.near}
-          onValueChange={(v) => onChange({ ...filters, near: v as Neighborhood | "all" })}
-        >
-          <SelectTrigger id="near" className="w-full">
-            <SelectValue />
-          </SelectTrigger>
+        <Label htmlFor="near">موقعیت (برای محاسبه فاصله)</Label>
+        <Button type="button" variant="outline" size="sm" className="h-9 gap-1.5" onClick={detectLoc}>
+          <LocateFixed className="size-3.5" aria-hidden />موقعیت من
+        </Button>
+        {filters.lat !== null && filters.lon !== null && (
+          <p className="text-[11px] text-emerald-600">
+            ({toPersianDigits(filters.lat)}، {toPersianDigits(filters.lon)})
+          </p>
+        )}
+        <Select value={filters.near} onValueChange={(v) => onChange({ ...filters, near: v as Neighborhood | "all" })}>
+          <SelectTrigger id="near" className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">همه تهران</SelectItem>
-            {NEIGHBORHOODS.map((n) => (
-              <SelectItem key={n} value={n}>
-                {n}
-              </SelectItem>
-            ))}
+            {NEIGHBORHOODS.map((n) => (<SelectItem key={n} value={n}>{n}</SelectItem>))}
           </SelectContent>
         </Select>
       </div>
@@ -152,34 +142,19 @@ function FiltersPanel({
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <Label htmlFor="radius">شعاع (کیلومتر)</Label>
-            <Badge variant="secondary" className="font-num">
-              {toPersianDigits(filters.radius_km)}
-            </Badge>
+            <Badge variant="secondary" className="font-num">{toPersianDigits(filters.radius_km)}</Badge>
           </div>
-          <Slider
-            id="radius"
-            min={1}
-            max={20}
-            step={1}
-            value={[filters.radius_km]}
-            onValueChange={(v) => onChange({ ...filters, radius_km: v[0] })}
-          />
+          <Slider id="radius" min={1} max={20} step={1} value={[filters.radius_km]} onValueChange={(v) => onChange({ ...filters, radius_km: v[0] })} />
         </div>
       )}
 
-      {/* Fast delivery */}
+      {/* Installment only */}
       <div className="flex items-center justify-between gap-2">
-        <Label htmlFor="fast" className="text-sm">فقط ارسال سریع</Label>
-        <Switch
-          id="fast"
-          checked={filters.fast_delivery}
-          onCheckedChange={(c) => onChange({ ...filters, fast_delivery: c })}
-        />
+        <Label htmlFor="installment" className="text-sm">فقط فروشگاه‌های قسطی</Label>
+        <Switch id="installment" checked={filters.installment_only} onCheckedChange={(c) => onChange({ ...filters, installment_only: c })} />
       </div>
 
-      <Button type="button" className="min-h-11" onClick={onApply}>
-        اعمال فیلترها
-      </Button>
+      <Button type="button" className="min-h-11" onClick={onApply}>اعمال فیلترها</Button>
     </Card>
   );
 }
@@ -239,6 +214,27 @@ export function SearchView({
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:py-8">
+      {/* Standalone search box so this tab works on its own */}
+      <form
+        onSubmit={(e) => { e.preventDefault(); setApplied({ ...draft, q: draft.q.trim() }); onFiltersChange({ ...draft, q: draft.q.trim() }); setOffset(0); }}
+        className="flex gap-2"
+      >
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute top-1/2 right-3 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+          <Input
+            type="search"
+            value={draft.q}
+            onChange={(e) => setDraft({ ...draft, q: e.target.value })}
+            placeholder="چی می‌خوای بخری؟ مثلاً «ماوس بی‌سیم زیر ۱ میلیون»"
+            className="h-11 pr-10 text-base"
+            aria-label="جست‌وجوی محصول"
+          />
+        </div>
+        <Button type="submit" className="min-h-11 gap-2" disabled={!draft.q.trim() || loading}>
+          <Search className="size-4" aria-hidden />جست‌وجو
+        </Button>
+      </form>
+
       <header className="flex flex-col gap-2">
         <h2 className="text-xl font-bold">
           نتایج جست‌وجو
@@ -351,6 +347,9 @@ export function SearchView({
           )}
         </section>
       </div>
+
+      {/* Side-by-side compare (up to 2 products) */}
+      <CompareBar onPickProduct={onSelectProduct} />
     </div>
   );
 }

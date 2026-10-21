@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Filter, Loader2, MapPin, Store } from "lucide-react";
+import { ExternalLink, Filter, LocateFixed, Loader2, MapPin, Store } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -13,20 +13,27 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { toPersianDigits } from "./format";
 import { ShopCard } from "./shop-card";
+import { SyntheticNameBadge } from "./disclaimers";
 import { NEIGHBORHOODS, type Neighborhood, type ShopSortOption, type ShopsResponse } from "./types";
 
 export interface ShopsFiltersState {
   near: Neighborhood | "all";
   radius_km: number;
   fast_delivery: boolean;
+  installment_only: boolean;
   sort: ShopSortOption;
+  lat: number | null;
+  lon: number | null;
 }
 
 export const DEFAULT_SHOPS_FILTERS: ShopsFiltersState = {
   near: "all",
   radius_km: 5,
   fast_delivery: false,
+  installment_only: false,
   sort: "matching_offers",
+  lat: null,
+  lon: null,
 };
 
 function buildUrl(f: ShopsFiltersState, limit: number): string {
@@ -37,7 +44,12 @@ function buildUrl(f: ShopsFiltersState, limit: number): string {
     sp.set("near", f.near);
     sp.set("radius_km", String(f.radius_km));
   }
+  if (f.lat !== null && f.lon !== null) {
+    sp.set("lat", String(f.lat));
+    sp.set("lon", String(f.lon));
+  }
   if (f.fast_delivery) sp.set("fast_delivery", "1");
+  if (f.installment_only) sp.set("installment_only", "1");
   return `/api/shops?${sp.toString()}`;
 }
 
@@ -107,24 +119,18 @@ export function ShopsView({
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="shops-near">محله</Label>
-              <Select
-                value={draft.near}
-                onValueChange={(v) => {
-                  const next = v as Neighborhood | "all";
-                  setDraft({ ...draft, near: next });
-                }}
-              >
-                <SelectTrigger id="shops-near" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
+              <Label htmlFor="shops-near">موقعیت (برای محاسبه فاصله)</Label>
+              <Button type="button" variant="outline" size="sm" className="h-9 gap-1.5" onClick={() => { if ("geolocation" in navigator) navigator.geolocation.getCurrentPosition((p) => setDraft({ ...draft, lat: Number(p.coords.latitude.toFixed(6)), lon: Number(p.coords.longitude.toFixed(6)) }), () => {}, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }); }}>
+                <LocateFixed className="size-3.5" aria-hidden />موقعیت من
+              </Button>
+              {draft.lat !== null && draft.lon !== null && (
+                <p className="text-[11px] text-emerald-600">({toPersianDigits(draft.lat)}، {toPersianDigits(draft.lon)})</p>
+              )}
+              <Select value={draft.near} onValueChange={(v) => { const next = v as Neighborhood | "all"; setDraft({ ...draft, near: next }); }}>
+                <SelectTrigger id="shops-near" className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">همه تهران</SelectItem>
-                  {NEIGHBORHOODS.map((n) => (
-                    <SelectItem key={n} value={n}>
-                      {n}
-                    </SelectItem>
-                  ))}
+                  {NEIGHBORHOODS.map((n) => (<SelectItem key={n} value={n}>{n}</SelectItem>))}
                 </SelectContent>
               </Select>
             </div>
@@ -168,11 +174,12 @@ export function ShopsView({
 
             <div className="flex items-center justify-between gap-2">
               <Label htmlFor="shops-fast" className="text-sm">فقط ارسال سریع</Label>
-              <Switch
-                id="shops-fast"
-                checked={draft.fast_delivery}
-                onCheckedChange={(c) => setDraft({ ...draft, fast_delivery: c })}
-              />
+              <Switch id="shops-fast" checked={draft.fast_delivery} onCheckedChange={(c) => setDraft({ ...draft, fast_delivery: c })} />
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="shops-installment" className="text-sm">فقط فروشگاه‌های قسطی</Label>
+              <Switch id="shops-installment" checked={draft.installment_only} onCheckedChange={(c) => setDraft({ ...draft, installment_only: c })} />
             </div>
 
             <Button
