@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bot, Home as HomeIcon, MapPin, Moon, Navigation, Search, Store, Sun } from "lucide-react";
+import { Bot, Home as HomeIcon, MapPin, Moon, Navigation, Search, Sparkles, Store, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import { ProductView } from "@/components/torob/product-view";
 import { ShopsView } from "@/components/torob/shops-view";
 import { MapView } from "@/components/torob/map-view";
 import { NearbyView } from "@/components/torob/nearby-view";
+import { ExploreView } from "@/components/torob/explore-view";
 import { AgentView } from "@/components/torob/agent-view";
 import {
   NEIGHBORHOODS,
@@ -22,10 +23,11 @@ import {
   type StatsResponse,
 } from "@/components/torob/types";
 
-type View = "home" | "search" | "product" | "shops" | "nearby" | "map" | "agent";
+type View = "home" | "explore" | "search" | "product" | "shops" | "nearby" | "map" | "agent";
 
 const TABS: { id: View; label: string; icon: React.ReactNode; hideInNav?: boolean }[] = [
   { id: "home", label: "خانه", icon: <HomeIcon className="size-4" aria-hidden /> },
+  { id: "explore", label: "کاوش", icon: <Sparkles className="size-4" aria-hidden /> },
   { id: "nearby", label: "خرید حضوری", icon: <Navigation className="size-4" aria-hidden /> },
   { id: "search", label: "جست‌وجو", icon: <Search className="size-4" aria-hidden /> },
   { id: "shops", label: "فروشگاه‌ها", icon: <Store className="size-4" aria-hidden /> },
@@ -217,6 +219,14 @@ export default function Home() {
               <ShopsView
                 initialNear={shopsNear}
                 onNearChange={(n) => setShopsNear(n)}
+              />
+            )}
+            {view === "explore" && (
+              <ExploreView
+                onPickProduct={(id) => {
+                  setSelectedProductId(id);
+                  setView("product");
+                }}
               />
             )}
             {view === "nearby" && <NearbyView />}

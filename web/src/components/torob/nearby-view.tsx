@@ -173,7 +173,6 @@ export function NearbyView() {
   // reload offers when filters change if a product is selected
   React.useEffect(() => {
     if (selected) loadOffers(selected);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loc, radius, installmentOnly, openNow]);
 
   return (
