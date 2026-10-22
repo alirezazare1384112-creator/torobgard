@@ -629,6 +629,9 @@ export class ShoppingTools {
 
   // ------------------------------------------------------------------ shops
   findShops(filters?: Filters, location?: [number, number]): ShopsResponse {
+    // Read `q` BEFORE defaultFilters strips it (it's not in the Filters type
+    // because it's shops-specific; we pass it via the filter object as an any).
+    const qRaw = (filters as any)?.q as string | undefined;
     const f = defaultFilters(filters);
     if (location) f.near = location;
     validateFilters(f as Filters);
@@ -649,6 +652,19 @@ export class ShoppingTools {
     if (f.brand) {
       condSql += " AND o.product_id IN (SELECT product_id FROM products WHERE brand = ?)";
       p.push(f.brand);
+    }
+    // Free-text product-name filter: when `q` is set (after normalizeText),
+    // restrict to shops that carry at least one product whose title_norm
+    // contains the query term(s). Like searchProducts, all terms must match.
+    if (qRaw) {
+      const qNorm = normalizeText(qRaw);
+      const qTerms = qNorm.split(/\s+/).filter((t) => t.length > 1);
+      if (qTerms.length > 0) {
+        const termConds = qTerms.map(() => "p.title_norm LIKE ?").join(" AND ");
+        const termParams = qTerms.map((t) => `%${t}%`);
+        condSql += ` AND o.product_id IN (SELECT product_id FROM products p WHERE ${termConds})`;
+        p.push(...termParams);
+      }
     }
     const rows = this.db
       .prepare(

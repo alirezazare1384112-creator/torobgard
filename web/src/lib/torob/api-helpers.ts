@@ -42,6 +42,9 @@ export function parseFilters(sp: URLSearchParams): Filters {
     limit: Number(sp.get("limit") ?? 20),
     offset: Number(sp.get("offset") ?? 0),
   };
+  // Free-text product-name filter (used by /api/shops to filter by product title).
+  const q = sp.get("q");
+  if (q !== null) (f as any).q = q.slice(0, 256);
   // also allow explicit lat/lon override
   const lat = num(sp.get("lat"));
   const lon = num(sp.get("lon"));

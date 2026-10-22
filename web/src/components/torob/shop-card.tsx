@@ -138,22 +138,13 @@ export function ShopCard({
 
   return (
     <motion.div whileHover={{ y: -2 }} transition={{ type: "spring", stiffness: 300, damping: 22 }}>
-      <Card className="h-full gap-3 p-4">
-        {/* Header: name + badges */}
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div className="flex items-start gap-2">
-            <div className="rounded-md bg-primary/10 p-2 text-primary"><Store className="size-4" aria-hidden /></div>
-            <div>
-              <h3 className="text-sm font-semibold leading-relaxed">{shop.name}</h3>
-              {shop.name_is_synthetic_warning && <SyntheticNameBadge />}
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {shop.supports_fast_delivery && <Badge className="gap-1 bg-emerald-600 text-white hover:bg-emerald-600"><Zap className="size-3" aria-hidden />ارسال سریع</Badge>}
-            {shop.has_installment && <Badge title="بر اساس دادهٔ ثبت‌شده — قبل از مراجعه تأیید کنید" className="gap-1 bg-amber-600 text-white hover:bg-amber-600"><CreditCard className="size-3" aria-hidden />اقساط (ثبت‌شده)</Badge>}
-            <Badge variant={shop.open_now === true ? "default" : shop.open_now === false ? "destructive" : "secondary"} className="gap-1">
-              <Clock className="size-3" aria-hidden />{openLabel}
-            </Badge>
+      <Card className="h-full gap-3 p-5">
+        {/* Header: name + synthetic badge */}
+        <div className="flex items-start gap-2">
+          <div className="shrink-0 rounded-md bg-primary/10 p-2 text-primary"><Store className="size-5" aria-hidden /></div>
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <h3 className="text-base font-semibold leading-tight">{shop.name}</h3>
+            {shop.name_is_synthetic_warning && <SyntheticNameBadge />}
           </div>
         </div>
 
@@ -164,16 +155,32 @@ export function ShopCard({
           <p className="text-xs text-muted-foreground">آدرس: اطلاعات موجود نیست</p>
         )}
 
-        {/* Offer + distance info */}
-        <div className="flex flex-wrap gap-1.5">
-          {shop.location_label && <Badge variant="outline">{shop.location_label}</Badge>}
+        {/* Hours — full row, larger + clearer (was cramped in the top bar) */}
+        <div className="flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2 text-sm">
+          <Clock className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <span className={
+            shop.open_now === true
+              ? "font-medium text-emerald-600"
+              : shop.open_now === false
+                ? "font-medium text-destructive"
+                : "text-muted-foreground"
+          }>
+            {openLabel}
+          </span>
+        </div>
+
+        {/* Offer + distance + installment badges — wrapped, larger */}
+        <div className="flex flex-wrap gap-2">
+          {shop.location_label && <Badge variant="outline" className="text-xs">{shop.location_label}</Badge>}
           {shop.distance_km !== null ? (
-            <Badge variant="secondary" className="font-num gap-1"><Navigation className="size-3" aria-hidden />{formatDistanceKm(shop.distance_km)}</Badge>
+            <Badge variant="secondary" className="gap-1 font-num text-xs"><Navigation className="size-3" aria-hidden />{formatDistanceKm(shop.distance_km)}</Badge>
           ) : (
-            <Badge variant="outline" className="gap-1"><Navigation className="size-3" aria-hidden />فاصله نامشخص</Badge>
+            <Badge variant="outline" className="gap-1 text-xs"><Navigation className="size-3" aria-hidden />فاصله نامشخص</Badge>
           )}
-          <Badge variant="outline" className="font-num">{toPersianDigits(shop.matching_offers)} پیشنهاد منطبق</Badge>
-          {shop.best_price_toman !== null && shop.best_price_toman !== undefined && <Badge variant="secondary" className="font-num">قیمت ثبت‌شده: {formatToman(shop.best_price_toman)}</Badge>}
+          <Badge variant="outline" className="font-num text-xs">{toPersianDigits(shop.matching_offers)} پیشنهاد منطبق</Badge>
+          {shop.best_price_toman !== null && shop.best_price_toman !== undefined && <Badge variant="secondary" className="font-num text-xs">قیمت ثبت‌شده: {formatToman(shop.best_price_toman)}</Badge>}
+          {shop.supports_fast_delivery && <Badge className="gap-1 bg-emerald-600 text-xs text-white hover:bg-emerald-600"><Zap className="size-3" aria-hidden />ارسال سریع</Badge>}
+          {shop.has_installment && <Badge title="بر اساس دادهٔ ثبت‌شده — قبل از مراجعه تأیید کنید" className="gap-1 bg-amber-600 text-xs text-white hover:bg-amber-600"><CreditCard className="size-3" aria-hidden />اقساط (ثبت‌شده)</Badge>}
         </div>
 
         {/* Confirmation status badge */}

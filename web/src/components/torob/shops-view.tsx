@@ -2,10 +2,11 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { ExternalLink, Filter, LocateFixed, Loader2, MapPin, Store } from "lucide-react";
+import { ExternalLink, Filter, LocateFixed, Loader2, MapPin, Search, Store } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,9 +18,9 @@ import { SyntheticNameBadge } from "./disclaimers";
 import { NEIGHBORHOODS, type Neighborhood, type ShopSortOption, type ShopsResponse } from "./types";
 
 export interface ShopsFiltersState {
+  q: string;              // product-name search (NEW)
   near: Neighborhood | "all";
   radius_km: number;
-  fast_delivery: boolean;
   installment_only: boolean;
   sort: ShopSortOption;
   lat: number | null;
@@ -27,9 +28,9 @@ export interface ShopsFiltersState {
 }
 
 export const DEFAULT_SHOPS_FILTERS: ShopsFiltersState = {
+  q: "",
   near: "all",
   radius_km: 5,
-  fast_delivery: false,
   installment_only: false,
   sort: "matching_offers",
   lat: null,
@@ -40,6 +41,7 @@ function buildUrl(f: ShopsFiltersState, limit: number): string {
   const sp = new URLSearchParams();
   sp.set("limit", String(limit));
   sp.set("sort", f.sort);
+  if (f.q.trim()) sp.set("q", f.q.trim());
   if (f.near !== "all") {
     sp.set("near", f.near);
     sp.set("radius_km", String(f.radius_km));
@@ -48,7 +50,6 @@ function buildUrl(f: ShopsFiltersState, limit: number): string {
     sp.set("lat", String(f.lat));
     sp.set("lon", String(f.lon));
   }
-  if (f.fast_delivery) sp.set("fast_delivery", "1");
   if (f.installment_only) sp.set("installment_only", "1");
   return `/api/shops?${sp.toString()}`;
 }
@@ -93,6 +94,13 @@ export function ShopsView({
   const shops = data?.shops ?? [];
   const total = data?.total ?? 0;
 
+  // Product search: submit on Enter or on "اعمال فیلترها" click.
+  const submitSearch = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setApplied(draft);
+    onNearChange(draft.near);
+  };
+
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:py-8">
       <header className="flex flex-col gap-2">
@@ -109,6 +117,25 @@ export function ShopsView({
           فروشگاه
         </p>
       </header>
+
+      {/* Product-name search bar (always visible at the top) */}
+      <form onSubmit={submitSearch} className="flex flex-wrap items-center gap-2">
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+          <Input
+            type="text"
+            value={draft.q}
+            onChange={(e) => setDraft({ ...draft, q: e.target.value })}
+            placeholder="نام محصول بنویس (مثلاً «ماوس بی‌سیم»، «لپ‌تاپ ایسوس»، «هدفون»)"
+            className="h-11 pr-10 text-sm"
+            aria-label="جست‌وجوی فروشگاه‌ها بر اساس نام محصول"
+            maxLength={256}
+          />
+        </div>
+        <Button type="submit" size="default" className="h-11 min-w-28 gap-1.5">
+          <Search className="size-4" aria-hidden />جست‌وجو
+        </Button>
+      </form>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[260px_1fr]">
         <aside className="lg:sticky lg:top-20 lg:self-start">
@@ -173,11 +200,6 @@ export function ShopsView({
             </div>
 
             <div className="flex items-center justify-between gap-2">
-              <Label htmlFor="shops-fast" className="text-sm">فقط ارسال سریع</Label>
-              <Switch id="shops-fast" checked={draft.fast_delivery} onCheckedChange={(c) => setDraft({ ...draft, fast_delivery: c })} />
-            </div>
-
-            <div className="flex items-center justify-between gap-2">
               <Label htmlFor="shops-installment" className="text-sm">فقط فروشگاه‌های قسطی</Label>
               <Switch id="shops-installment" checked={draft.installment_only} onCheckedChange={(c) => setDraft({ ...draft, installment_only: c })} />
             </div>
@@ -214,14 +236,16 @@ export function ShopsView({
             <Card className="flex flex-col items-center gap-3 p-8 text-center text-muted-foreground">
               <MapPin className="size-8" aria-hidden />
               <p className="text-sm">
-                فروشگاه‌ای با این فیلترها یافت نشد. محله یا شعاع را تغییر دهید.
+                {applied.q.trim()
+                  ? `فروشگاهی که «${applied.q.trim()}» را با این فیلترها داشته باشد یافت نشد. عبارت را کلیک‌تر کن یا فیلترها را تغییر بده.`
+                  : "فروشگاه‌ای با این فیلترها یافت نشد. محله یا شعاع را تغییر دهید."}
               </p>
             </Card>
           )}
 
           {!loading && shops.length > 0 && (
             <motion.div
-              key={`${applied.near}-${applied.radius_km}-${applied.sort}-${applied.fast_delivery}`}
+              key={`${applied.q}-${applied.near}-${applied.radius_km}-${applied.sort}-${applied.installment_only}`}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               transition={{ duration: 0.2 }}
