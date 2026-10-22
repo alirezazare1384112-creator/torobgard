@@ -43,6 +43,9 @@ export const DEFAULT_SEARCH_FILTERS: SearchFiltersState = {
 
 const PAGE_SIZE = 12;
 
+/** Quick-start queries for the empty landing state of the search tab. */
+const QUICK_STARTS = ["ماوس بی‌سیم", "هدفون", "لپ‌تاپ ایسوس", "دوربین", "ساعت هوشمند", "پاوربانک"];
+
 function buildUrl(filters: SearchFiltersState, offset: number): string {
   const sp = new URLSearchParams();
   sp.set("q", filters.q);
@@ -214,6 +217,14 @@ export function SearchView({
     setOffset(0);
   };
 
+  const quickSearch = (q: string) => {
+    const next = { ...draft, q };
+    setDraft(next);
+    setApplied(next);
+    onFiltersChange(next);
+    setOffset(0);
+  };
+
   const items = data?.items ?? [];
   const total = data?.total ?? 0;
   const hasMore = offset + PAGE_SIZE < total;
@@ -350,7 +361,19 @@ export function SearchView({
           {!loading && !data && !error && (
             <Card className="flex flex-col items-center gap-3 p-8 text-center text-muted-foreground">
               <Search className="size-8" aria-hidden />
-              <p className="text-sm">برای شروع جست‌وجو، یک عبارت وارد کنید.</p>
+              <p className="text-sm">برای شروع جست‌وجو، یک عبارت وارد کنید — یا یکی از این‌ها را امتحان کنید:</p>
+              <div className="flex flex-wrap justify-center gap-2">
+                {QUICK_STARTS.map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => quickSearch(q)}
+                    className="min-h-9 rounded-full border border-border bg-card px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-accent"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
             </Card>
           )}
         </section>

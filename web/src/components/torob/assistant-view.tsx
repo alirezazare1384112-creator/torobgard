@@ -193,6 +193,29 @@ function StepDetails({ step }: { step: AgentStep }) {
   );
 }
 
+/** Quick reply-copy affordance for finished assistant messages. */
+function CopyReplyButton({ text }: { text: string }) {
+  const [copied, setCopied] = React.useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard unavailable */ }
+  };
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      aria-label="کپی پاسخ"
+      title={copied ? "کپی شد" : "کپی پاسخ"}
+      className="mt-0.5 shrink-0 rounded-md p-1 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+    >
+      {copied ? <Check className="size-3.5 text-emerald-600" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
+    </button>
+  );
+}
+
 /** Quick "refine preference" chips attached to each product card. */
 const REFINE_CHIPS = [
   { label: "ارزان‌تر", msg: "گزینه‌های ارزان‌تر از این نشان بده" },
@@ -416,7 +439,9 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
     liveIdRef.current = liveId;
     setMessages((m) => [
       ...m,
-      { id: `u-${Date.now()}`, role: "user", text: trimmed },
+      // display copy is moderated (the raw message still goes to the server
+      // so intent detection & regex pre-extraction keep working)
+      { id: `u-${Date.now()}`, role: "user", text: sanitizeText(trimmed) },
       { id: liveId, role: "assistant", text: "", steps: [], streaming: true },
     ]);
     setInput("");
@@ -554,6 +579,7 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
                   ) : (
                     <p className="whitespace-pre-wrap">{m.text}</p>
                   )}
+                  {m.role === "assistant" && !m.streaming && m.text && <CopyReplyButton text={m.text} />}
                   {m.fallback && !m.streaming && m.role === "assistant" && m.text && (
                     <Badge variant="outline" className="ml-1 shrink-0 self-center text-[9px]">حالت ساده</Badge>
                   )}

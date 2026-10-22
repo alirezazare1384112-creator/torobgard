@@ -81,7 +81,7 @@ export const REMEMBER_SPEC = `remember (اختیاری، object): به‌روز�
 - category (string): دستهٔ محصول مثل «کفش»، «ماوس»، «هدفون»
 - productQuery (string): عبارت جست‌وجوی هدف
 - intendedUse (string): کاربری مثل university|work|gaming|music|everyday
-- budgetMin / budgetMax (number, تومان)
+- budgetMin / budgetMax (number, تومان) — نکتهٔ واحد پول: در فارسی محاوره‌ای «زیر ۵۰۰» یا «۵ تومن» یعنی ۵۰۰ هزار تومان / ۵۰ هزار تومان (۱ تومن = ۱۰,۰۰۰ تومان). عدد بدون واحد را با همین قرارداد تفسیر کن و اگر باز مبهم بود با ask یک سؤال کوتاه بپرس.
 - priority (string): comfort|appearance|durability|price|performance|portability|battery|sound|precision|wireless|mechanical|quiet|noise_cancel|balanced
 - brandPreference (string)
 - installmentOnly (boolean)
