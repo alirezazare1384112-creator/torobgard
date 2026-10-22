@@ -2,11 +2,12 @@
 
 A Persian shopping assistant for Tehran, grounded entirely in the Torob dataset.
 Search, filters, offer comparison, and shop discovery run without any LLM, and a
-Persian RTL web UI plus an optional LLM shopping agent sit on top of the same data.
+Persian RTL web UI plus a multi-step LLM shopping agent sit on top of the same data.
 
-<<<<<<< HEAD
-**Status:** Phase 1–2 (data audit, import, core tools, tests) **+ Phase 3 (Persian RTL
-Next.js frontend, TypeScript tool port, LLM agent UI)**.
+**Status:** Phase 1–8 — data audit & import, core tools, stdlib HTTP API, tests,
+Persian RTL Next.js frontend, TypeScript tool port, and a **multi-step agentic
+assistant** (ReAct loop with tool chaining, cross-turn memory, live streamed
+reasoning trace, and a Persian/English profanity moderation layer).
 
 ## Repository layout
 
@@ -14,18 +15,15 @@ This repo has two layers that share one SQLite database:
 
 | Path | Layer | Language |
 |---|---|---|
-| `tehran_agent/` | Data import + core tools (source of truth) | Python |
-| `tests/` | Tests for the Python tools | Python |
+| `tehran_agent/` | Data import + core tools + HTTP API (source of truth) | Python |
+| `tests/` | Tests for the Python tools and API | Python |
 | `scripts/audit_dataset.py` | Dataset profiling | Python |
 | `docs/DATA_AUDIT.md` | Schema, field reliability, limitations | — |
-| `web/` | Persian RTL Next.js frontend + TS tool port + LLM agent UI | TypeScript |
+| `web/` | Persian RTL Next.js frontend + TS tool port + agentic LLM assistant | TypeScript |
 
 The `web/` app ports `tehran_agent/tools.py` to TypeScript and reads the same
 `data/torob.sqlite` produced by `tehran_agent/importer.py` — so the real dataset
 drops in with no code changes. See [`web/README.md`](web/README.md) for run steps.
-=======
-**Status:** Phase 3 ready (data audit, import, core tools, HTTP API, tests). Frontend and agent UI are not built yet.
->>>>>>> feat/api-and-dataset
 
 ## Dataset setup
 
@@ -55,7 +53,18 @@ python -m unittest discover -s tests -v
 python -m tehran_agent.api --db data/torob.sqlite --host 127.0.0.1 --port 8000
 ```
 
-<<<<<<< HEAD
+Open: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+
+Useful endpoints:
+- `/health`
+- `/api/meta`
+- `/api/search?q=ماوس+بی+سیم&max_price=1000000&limit=10`
+- `/api/product/<product_id>`
+- `/api/compare/<product_id>?sort=distance&near=صادقیه&radius_km=5`
+- `/api/shops?sort=matching_offers&category=هدفون، هدست و هندزفری`
+- `/api/alternatives/<product_id>?budget_toman=3000000&limit=8`
+- `/api/trip?product_id=<id1>&product_id=<id2>&near=صادقیه&max_shops=2`
+
 ## Run the web frontend
 
 ```bash
@@ -68,19 +77,23 @@ bun run dev   # http://localhost:3000
 
 See [`web/README.md`](web/README.md) for details, including how to use the real
 dataset and the phrase-match fix for «ماوس بی‌سیم» vs «ماوس با سیم».
-=======
-Open: [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
-Useful endpoints:
-- `/health`
-- `/api/meta`
-- `/api/search?q=ماوس+بی+سیم&max_price=1000000&limit=10`
-- `/api/product/<product_id>`
-- `/api/compare/<product_id>?sort=distance&near=صادقیه&radius_km=5`
-- `/api/shops?sort=matching_offers&category=هدفون، هدست و هندزفری`
-- `/api/alternatives/<product_id>?budget_toman=3000000&limit=8`
-- `/api/trip?product_id=<id1>&product_id=<id2>&near=صادقیه&max_shops=2`
->>>>>>> feat/api-and-dataset
+## The agentic assistant (web)
+
+`POST /api/agent` runs a ReAct-style loop: the model emits
+`{"thinking","remember","action"}` JSON each step, the server executes the action
+(search → compare → trip → …) and feeds the observation back, up to 4 steps per
+turn. The response is an NDJSON stream of `{type:"step"}` events plus a final
+`{type:"done"}` payload, so the UI shows the agent's live reasoning trace, inline
+product/shop cards, verify panels, and proactive suggestion chips.
+
+Safety & tone:
+- The system prompt enforces polite Persian, dataset honesty (no invented
+  prices/ids), and a strict no-profanity rule — insults are never mirrored.
+- `web/src/lib/torob/moderation.ts` adds defense in depth: tolerant
+  Persian/English profanity matching (ZWNJ/space/repetition obfuscation, common
+  suffixes) applied server-side to replies/thinking/questions and re-applied in
+  the client before render; clean text passes through byte-for-byte unchanged.
 
 ## Layout
 
@@ -92,7 +105,7 @@ Useful endpoints:
 - `tests/test_api.py` — HTTP API integration tests
 - `scripts/audit_dataset.py` — dataset profiling
 - `docs/DATA_AUDIT.md` — schema, field reliability, and limitations
-- `web/` — Next.js 16 + Tailwind 4 + shadcn/ui Persian RTL frontend, TS port of the tools, and an LLM agent over the 6 tools
+- `web/` — Next.js 16 + Tailwind 4 + shadcn/ui Persian RTL frontend, TS port of the tools, and the multi-step LLM agent over the tools
 
 ## Data limitations
 
