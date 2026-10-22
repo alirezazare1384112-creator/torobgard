@@ -67,13 +67,14 @@ export const TOOL_SPECS: ToolSpec[] = [
     purpose: "ساخت پیام آمادهٔ فارسی برای استعلام قیمت/موجودی امروز از فروشنده (کاربر خودش می‌فرستد — ما خودکار نمی‌فرستیم).",
     args: "shop_id و product_id (لازم)؛ اختیاری: color، size، ask_installment (bool)",
   },
-  {
-    name: "record_seller_confirmation",
-    purpose: "ثبت نتیجهٔ تماس دستی کاربر با فروشنده (فقط همین نشست نگه‌داری می‌شود).",
-    args:
-      "shop_id و product_id (لازم)؛ status (confirmed|pending|no_response|unconfirmed)؛ اختیاری: confirmed_price_toman، in_stock (bool)، note",
-  },
 ];
+
+// SECURITY: record_seller_confirmation is deliberately NOT in the model's
+// tool catalog. The LLM must not be able to manufacture a seller confirmation
+// from its own generated arguments — only the human-controlled /api/confirm
+// endpoint (which validates shop_id/product_id against the DB and requires an
+// explicit user action) can record a confirmation. The model can prepare an
+// inquiry (prepare_seller_inquiry) but never record one.
 
 /** Session fields the model may patch via "remember". */
 export const REMEMBER_SPEC = `remember (اختیاری، object): به‌روزرسانی حافظهٔ ساختاریافتهٔ خرید. کلیدهای مجاز:
@@ -91,7 +92,7 @@ const TOOL_LIST = TOOL_SPECS.map(
   (t) => `- ${t.name}: ${t.purpose}\n  آرگومان‌ها: ${t.args}`
 ).join("\n");
 
-export const AGENT_SYSTEM_PROMPT = `You are «طرب‌گارد» — a Persian in-person shopping assistant for Tehran, running as a multi-step agent. You help users who may not yet know exactly which product they want, then find, compare, and verify shops — grounded ONLY in a real Torob dataset (prices in toman).
+export const AGENT_SYSTEM_PROMPT = `You are «ترب‌گرد» — a Persian in-person shopping assistant for Tehran, running as a multi-step agent. You help users who may not yet know exactly which product they want, then find, compare, and verify shops — grounded ONLY in a real Torob dataset (prices in toman).
 
 ## TONE & SAFETY (قانون شکست‌ناپذیر)
 - همیشه مودب، گرم و حرفه‌ای صحبت کن؛ به کاربر «شما» بگو.
@@ -127,6 +128,7 @@ ${TOOL_LIST}
 - Multiple products to buy in person → plan_shopping_trip with items.
 - «گرن است / ارزان‌تر دارید؟» → find_alternatives (budget if known).
 - Need shop hours or a price-confirmation message → check_shop_hours / prepare_seller_inquiry.
+- You CANNOT record a seller confirmation yourself — only the user can record a manual call result via the dedicated UI; never claim a seller confirmed anything unless the user explicitly told you so.
 - Typically 1–2 tool calls are enough. Never chain more than 3; budget is 4 steps total.
 - Off-topic chat → answer briefly in Persian, then offer shopping help (action=final).
 

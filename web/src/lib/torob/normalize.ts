@@ -124,12 +124,18 @@ export function parseQuery(query: string): ParsedQuery {
 
   const tokens = norm.split(/\s+/).filter(Boolean);
 
-  // connectivity: detect "بی سIM" (wireless) or "با سIM" (wired). normalizeText
+  // connectivity: detect "بی سیم" (wireless) or "با سیم" (wired). normalizeText
   // already collapsed ZWNJ to a space, so both spellings land here as two tokens.
-  // Also support the single-token adjectives "سیمی", plus English "wireless"/"wired"
-  // (Phase-2 parity with the Python tools._connection_mode).
+  // Also support the single-token adjectives "سیمی", the Persian transliteration
+  // "وایرلس", and English "wireless"/"wired".
+  // NOTE: "بلوتوثی" (bluetooth) is NOT treated as a connectivity attribute —
+  // bluetooth is a feature, and a title may say "بلوتوثی" without "بی سیم",
+  // so forcing the wireless SQL filter would exclude the very products the user
+  // wants. "بلوتوثی" stays as a search term instead.
   const hasWireless =
-    hasTokenPair(tokens, "بی", "سیم") || tokens.includes("wireless");
+    hasTokenPair(tokens, "بی", "سیم") ||
+    tokens.includes("wireless") ||
+    tokens.includes("وایرلس");
   const hasWired =
     hasTokenPair(tokens, "با", "سیم") ||
     tokens.includes("سیمی") ||
@@ -138,13 +144,17 @@ export function parseQuery(query: string): ParsedQuery {
   else if (hasWired && !hasWireless) out.connectivity = "wired";
 
   // strip connectivity tokens from the product-terms stream (applied below).
-  const stripConn = new Set(["بی", "با", "سیم", "سیمی", "wireless", "wired"]);
+  const stripConn = new Set(["بی", "با", "سیم", "سیمی", "wireless", "wired", "وایرلس"]);
 
   // Budget parsing — supports:
-  //   "تا ۲ میلیون" / "زیر یک میلیون" / "حداکثر ۳ میلیون"
+  //   "تا ۲ میلیون" / "زیر یک میلیون" / "حداکثر ۳ میلیون"   (Persian prefixes)
+  //   "under 2000000" / "below 3m toman" / "up to 5 million" (English prefixes)
   //   "بین ۲ تا ۴ میلیون"
   //   "1,000,000" / "1.5 میلیون" / "500 هزار"
-  //   Persian digits already normalized to Latin by normalizeText
+  //   Spelled-out Persian numbers (یک/دو/.../ده) before a unit are supported
+  //   via the WORD_NUM map (so "زیر یک میلیون" works). Standalone spelled-out
+  //   numbers without a unit are NOT supported (documented limitation).
+  //   Persian digits already normalized to Latin by normalizeText.
   let budgetStripped = norm;
 
   // Pattern 1: "بین X تا Y [unit]" → min=X, max=Y
@@ -158,17 +168,35 @@ export function parseQuery(query: string): ParsedQuery {
     out.maxBudget = Math.max(lo, hi);
     budgetStripped = norm.replace(rangeRe, " ");
   } else {
-    // Pattern 2: "prefix X [unit]" — single bound
-    const budgetRe = /(زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از)\s+(\d+(?:[,.]\d+)?)\s*(میلیارد|میلیون|هزار)?/;
+    // Pattern 2: "prefix X [unit]" — single bound. Supports Persian prefixes
+    // (زیر|تا|حداکثر|بیشتر از|کمتر از) and English prefixes
+    // (under|below|up to|max|less than|more than|cheaper than). X can be a
+    // digit sequence OR a spelled-out Persian number (یک/دو/...).
+    const wordNumAlt = Object.keys(WORD_NUM).join("|");
+    const budgetRe = new RegExp(
+      `(زیر|تا|حداکثر|بیشتر\\s*از|کمتر\\s*از|under|below|up\\s*to|less\\s*than|more\\s*than|cheaper\\s*than|max)\\s+((?:\\d+(?:[,.]\\d+)?)|(?:${wordNumAlt}))\\s*(میلیارد|میلیون|هزار|million|billion|k|m)?`,
+      "i"
+    );
     const bm = norm.match(budgetRe);
     if (bm) {
-      const n = parseFloat(bm[2].replace(/,/g, ""));
-      const mult = MULT[bm[3] ?? ""] ?? 1;
-      const amount = Math.round(n * mult);
-      const prefix = bm[1];
-      if (prefix.includes("بیشتر")) out.minBudget = amount;
-      else out.maxBudget = amount;
-      budgetStripped = norm.replace(budgetRe, " ");
+      const rawN = bm[2];
+      const n = /^\d/.test(rawN) ? parseFloat(rawN.replace(/,/g, "")) : (WORD_NUM[rawN] ?? null);
+      if (n !== null) {
+        const unitRaw = (bm[3] ?? "").toLowerCase();
+        const mult =
+          MULT[bm[3] ?? ""] ??
+          (unitRaw === "million" ? 1_000_000 :
+           unitRaw === "billion" ? 1_000_000_000 :
+           unitRaw === "k" ? 1_000 :
+           unitRaw === "m" ? 1_000_000 : 1);
+        const amount = Math.round(n * mult);
+        const prefix = bm[1].toLowerCase();
+        // "بیشتر"/"more than"/"cheaper than" (cheaper is a misspeak — treat as "more than" is wrong;
+        // actually "cheaper than X" means "under X". Handle explicitly.)
+        if (prefix.includes("بیشتر") || prefix === "more than") out.minBudget = amount;
+        else out.maxBudget = amount;
+        budgetStripped = norm.replace(bm[0], " ");
+      }
     }
   }
 
@@ -183,10 +211,15 @@ export function parseQuery(query: string): ParsedQuery {
     budgetStripped = budgetStripped.replace(/(?:بدون|نه)\s+\S+/g, " ");
   }
 
-  // drop the budget prefix word, currency word, and connectivity tokens
+  // drop the budget prefix word, currency word, unit words, and connectivity tokens
+  // (Persian + English; case-insensitive for English)
   let termStream = budgetStripped
     .replace(/(زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از|بین)/g, " ")
-    .replace(/toman|تومان/gi, " ");
+    .replace(/\b(under|below|up\s*to|less\s*than|more\s*than|cheaper\s*than|max|million|billion|toman)\b/gi, " ")
+    .replace(/toman|تومان/gi, " ")
+    // standalone unit letters k/m after a number were already consumed by the
+    // budget regex; drop any stragglers so they don't pollute the term stream.
+    .replace(/\b[km]\b/gi, " ");
   const termTokens = termStream.split(/\s+/).filter((t) => t.length > 1);
   out.terms = termTokens.filter((t) => !stripConn.has(t));
 

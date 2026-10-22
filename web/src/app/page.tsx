@@ -44,13 +44,33 @@ export default function Home() {
   const [categories, setCategories] = React.useState<StatsCategory[]>([]);
   const [loadingMeta, setLoadingMeta] = React.useState(true);
   const [loadingStats, setLoadingStats] = React.useState(true);
+  const [errorMeta, setErrorMeta] = React.useState<string | null>(null);
+  const [errorStats, setErrorStats] = React.useState<string | null>(null);
+
+  const fetchMeta = React.useCallback(() => {
+    setLoadingMeta(true);
+    setErrorMeta(null);
+    fetch("/api/meta")
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((j: MetaResponse) => setMeta(j))
+      .catch((e) => setErrorMeta(e instanceof Error ? e.message : "خطا در دریافت اطلاعات"))
+      .finally(() => setLoadingMeta(false));
+  }, []);
+
+  const fetchStats = React.useCallback(() => {
+    setLoadingStats(true);
+    setErrorStats(null);
+    fetch("/api/stats")
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((j: StatsResponse) => setCategories(j.categories ?? []))
+      .catch((e) => setErrorStats(e instanceof Error ? e.message : "خطا در دریافت آمار"))
+      .finally(() => setLoadingStats(false));
+  }, []);
 
   React.useEffect(() => {
-    let cancelled = false;
-    fetch("/api/meta").then((r) => r.json()).then((j: MetaResponse) => { if (!cancelled) setMeta(j); }).catch(() => {}).finally(() => !cancelled && setLoadingMeta(false));
-    fetch("/api/stats").then((r) => r.json()).then((j: StatsResponse) => { if (!cancelled) setCategories(j.categories ?? []); }).catch(() => {}).finally(() => !cancelled && setLoadingStats(false));
-    return () => { cancelled = true; };
-  }, []);
+    fetchMeta();
+    fetchStats();
+  }, [fetchMeta, fetchStats]);
 
   const goSearch = (q: string) => {
     setSearchFilters({ ...DEFAULT_SEARCH_FILTERS, q });
@@ -100,6 +120,10 @@ export default function Home() {
                 categories={categories}
                 loadingMeta={loadingMeta}
                 loadingStats={loadingStats}
+                errorMeta={errorMeta}
+                errorStats={errorStats}
+                onRetryMeta={fetchMeta}
+                onRetryStats={fetchStats}
                 onSearch={goSearch}
                 onOpenAssistant={() => setNavView("assistant")}
               />
@@ -142,7 +166,7 @@ export default function Home() {
                 <span className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">
                   <svg className="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden><path d="M3 9l1-5h16l1 5M4 9v11h16V9M4 9h16" /></svg>
                 </span>
-                <span className="font-bold">طرب‌گارد</span>
+                <span className="font-bold">ترب‌گرد</span>
               </div>
               <p className="text-xs leading-relaxed text-muted-foreground">
                 دستیار خرید حضوری تهران — از «نمی‌دانم چی بخرم» تا «می‌دانم کدام فروشگاه نزدیک است».
@@ -162,7 +186,7 @@ export default function Home() {
             </div>
           </div>
           <div className="mt-6 flex flex-col items-center justify-between gap-2 border-t border-border pt-4 text-xs text-muted-foreground sm:flex-row">
-            <p>© {new Date().getFullYear()} طرب‌گارد — دستیار خرید تهران.</p>
+            <p>© {new Date().getFullYear()} ترب‌گرد — دستیار خرید تهران.</p>
             <p>طراحی‌شده برای کاربران فارسی‌زبان در تهران.</p>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import ZAI from "z-ai-web-dev-sdk";
 import { getTools, resolveLocation, NEIGHBORHOODS, type Filters } from "@/lib/torob";
 import { buildSystemPrompt } from "@/lib/torob/agent-tools";
@@ -53,6 +54,66 @@ const DATA_TOOLS = new Set([
 interface Msg {
   role: "assistant" | "user";
   content: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Request validation (Zod — ported from the security audit)           */
+/* ------------------------------------------------------------------ */
+
+const PRIORITY_VALUES = ["comfort", "appearance", "durability", "price", "balanced", "precision", "wireless", "mechanical", "quiet", "performance", "portability", "battery", "sound", "noise_cancel"] as const;
+
+const sessionSchema = z.object({
+  category: z.string().max(120).nullable().optional(),
+  productQuery: z.string().max(200).nullable().optional(),
+  intendedUse: z.string().max(50).nullable().optional(),
+  budgetMin: z.number().min(0).max(10_000_000_000).nullable().optional(),
+  budgetMax: z.number().min(0).max(10_000_000_000).nullable().optional(),
+  priority: z.enum(PRIORITY_VALUES).nullable().optional(),
+  style: z.string().max(50).nullable().optional(),
+  brandPreference: z.string().max(100).nullable().optional(),
+  installmentOnly: z.boolean().optional(),
+  neighborhood: z.string().max(100).nullable().optional(),
+  lat: z.number().min(-90).max(90).nullable().optional(),
+  lon: z.number().min(-180).max(180).nullable().optional(),
+  selectedProductIds: z.array(z.string().max(100)).max(50).optional(),
+  excludedProductIds: z.array(z.string().max(100)).max(50).optional(),
+  answersGiven: z.array(z.string().max(30)).max(20).optional(),
+  createdAt: z.string().max(50).optional(),
+  updatedAt: z.string().max(50).optional(),
+}).strict();
+
+const historyMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1).max(5000),
+}).strict();
+
+const agentRequestSchema = z.object({
+  message: z.string().min(1).max(2000),
+  history: z.array(historyMessageSchema).max(10).nullish(),
+  facts: z.array(z.string().max(600)).max(20).nullish(),
+  session: sessionSchema.nullish(),
+}).strict();
+
+/** Copies Zod-validated session fields onto a fresh session. */
+function sessionFromValidated(s: z.infer<typeof sessionSchema> | null | undefined): ShoppingSession {
+  const session = createSession();
+  if (!s) return session;
+  session.category = s.category ?? null;
+  session.productQuery = s.productQuery ?? null;
+  session.intendedUse = s.intendedUse ?? null;
+  session.budgetMin = s.budgetMin ?? null;
+  session.budgetMax = s.budgetMax ?? null;
+  session.priority = (s.priority as ShoppingSession["priority"]) ?? null;
+  session.style = s.style ?? null;
+  session.brandPreference = s.brandPreference ?? null;
+  session.installmentOnly = s.installmentOnly ?? false;
+  session.neighborhood = s.neighborhood ?? null;
+  session.lat = s.lat ?? null;
+  session.lon = s.lon ?? null;
+  session.selectedProductIds = s.selectedProductIds ?? [];
+  session.excludedProductIds = s.excludedProductIds ?? [];
+  session.answersGiven = s.answersGiven ?? [];
+  return session;
 }
 
 interface ParsedAction {
@@ -279,14 +340,11 @@ function execTool(name: string, args: Record<string, any>): unknown {
         ask_installment: !!args.ask_installment,
       });
     case "record_seller_confirmation":
-      return tools.recordSellerConfirmation({
-        shop_id: String(args.shop_id ?? ""),
-        product_id: String(args.product_id ?? ""),
-        status: (args.status as any) ?? "unconfirmed",
-        confirmed_price_toman: typeof args.confirmed_price_toman === "number" ? args.confirmed_price_toman : null,
-        in_stock: typeof args.in_stock === "boolean" ? args.in_stock : null,
-        note: args.note ? String(args.note) : null,
-      });
+      // SECURITY: the LLM must not be able to manufacture a seller
+      // confirmation from its own generated arguments — only the
+      // human-controlled /api/confirm endpoint (validates IDs against the DB,
+      // explicit user POST) can record one.
+      return { error: "record_seller_confirmation is not available to the agent. Confirmations can only be recorded by the user via the dedicated UI." };
     default:
       throw new Error(`unknown tool: ${name}`);
   }
@@ -854,6 +912,15 @@ export async function POST(req: Request) {
   const url = new URL(req.url);
   const streamMode = url.searchParams.get("stream") !== "0";
 
+  // Cap request body size at 64KB to prevent oversized payloads.
+  const contentLength = req.headers.get("content-length");
+  if (contentLength && parseInt(contentLength, 10) > 65536) {
+    return NextResponse.json(
+      { error: "request body too large (max 64KB)", code: "validation_error" },
+      { status: 413 }
+    );
+  }
+
   let body: any;
   try {
     body = await req.json();
@@ -864,7 +931,21 @@ export async function POST(req: Request) {
     );
   }
 
-  const question = typeof body?.message === "string" ? body.message.trim() : "";
+  // Validate the full request body with Zod (strict: no unknown fields).
+  const validated = agentRequestSchema.safeParse(body);
+  if (!validated.success) {
+    const firstIssue = validated.error.issues[0];
+    const msg = firstIssue
+      ? `${firstIssue.path.join(".") || "body"}: ${firstIssue.message}`
+      : "validation error";
+    return NextResponse.json(
+      { error: msg, code: "validation_error" },
+      { status: 400 }
+    );
+  }
+  const { message: rawMessage, history: rawHistory, facts: rawFacts } = validated.data;
+
+  const question = rawMessage.trim();
   if (!question) {
     return NextResponse.json(
       { error: "message is required", code: "validation_error" },
@@ -872,18 +953,10 @@ export async function POST(req: Request) {
     );
   }
 
-  const history: Msg[] = Array.isArray(body?.history)
-    ? body.history.filter(
-        (m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string"
-      )
-    : [];
-  const facts: string[] = Array.isArray(body?.facts)
-    ? body.facts.filter((f: unknown) => typeof f === "string" && f.trim()).slice(-10)
-    : [];
+  const history: Msg[] = (rawHistory ?? []).map((m) => ({ role: m.role as Msg["role"], content: m.content }));
+  const facts: string[] = (rawFacts ?? []).filter((f) => f.trim()).slice(-10);
 
-  let session: ShoppingSession = body?.session
-    ? { ...createSession(), ...body.session }
-    : createSession();
+  let session: ShoppingSession = sessionFromValidated(validated.data.session);
 
   // Cheap pre-extraction, then the LLM "remember" patches refine/override it.
   session = preExtract(question, session);

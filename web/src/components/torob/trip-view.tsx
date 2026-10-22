@@ -23,6 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCart } from "./cart-store";
 import { SyntheticNameBadge } from "./disclaimers";
 import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
+import { RouteMap, type MapStop } from "./route-map";
 import type { SearchItem, SearchResponse } from "./types";
 
 /**
@@ -56,12 +57,6 @@ const NB_COORDS: Record<string, [number, number]> = {
   "میدان ولیعصر": [35.6997, 51.413], "تجریش": [35.805, 51.43], "شریعتی": [35.76, 51.433],
 };
 
-// Tehran bbox for the schematic map
-const LAT_MIN = 35.64, LAT_MAX = 35.81, LON_MIN = 51.31, LON_MAX = 51.51;
-const VB_W = 600, VB_H = 500, PAD = 30;
-function lonToX(lon: number) { return PAD + ((lon - LON_MIN) / (LON_MAX - LON_MIN)) * (VB_W - 2 * PAD); }
-function latToY(lat: number) { return PAD + ((LAT_MAX - lat) / (LAT_MAX - LAT_MIN)) * (VB_H - 2 * PAD); }
-
 /** Google Maps directions URL from start to a destination lat/lon. */
 function gmapsDirectionsUrl(from: { lat: number; lon: number } | null, to: { lat: number; lon: number }): string {
   const dest = `${to.lat},${to.lon}`;
@@ -85,6 +80,16 @@ export function TripView() {
   const [unmatched, setUnmatched] = React.useState<string[]>([]);
   const [planning, setPlanning] = React.useState(false);
   const [planError, setPlanError] = React.useState<string | null>(null);
+
+  // Routing provider status — fetched once on mount. Shows whether real road
+  // routing (Neshan) is configured or distances are straight-line estimates.
+  const [routingMode, setRoutingMode] = React.useState<"real_road" | "straight_line_estimate" | null>(null);
+  React.useEffect(() => {
+    fetch("/api/route")
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((j: { mode: "real_road" | "straight_line_estimate" }) => setRoutingMode(j.mode))
+      .catch(() => setRoutingMode(null));
+  }, []);
 
   const search = (q: string) => {
     if (!q.trim()) return;
@@ -165,24 +170,26 @@ export function TripView() {
     return ordered;
   }, [plan, loc]);
 
-  // schematic route points (use the ordered plan)
-  const mappedStops = orderedPlan.filter((s) => s.shop.lat !== null && s.shop.lon !== null);
-  const points = [
-    loc ? { x: lonToX(loc.lon), y: latToY(loc.lat), label: loc.label, isStart: true } : null,
-    ...mappedStops.map((s) => ({ x: lonToX(s.shop.lon!), y: latToY(s.shop.lat!), label: s.shop.name, isStart: false })),
-  ].filter(Boolean) as { x: number; y: number; label: string; isStart: boolean }[];
-  const pathD = points.length > 1 ? points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ") : "";
-
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:py-8">
       <header className="flex flex-col gap-1">
-        <h2 className="flex items-center gap-2 text-xl font-bold">
-          <Route className="size-5" aria-hidden />برنامهٔ خرید
-        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-xl font-bold">
+            <Route className="size-5" aria-hidden />برنامهٔ خرید
+          </h2>
+          {routingMode && (
+            <Badge variant={routingMode === "real_road" ? "default" : "outline"} className="gap-1 text-[11px]">
+              <Navigation className="size-3" aria-hidden />
+              {routingMode === "real_road" ? "مسیریابی واقعی (نشان)" : "فاصلهٔ هوایی (مسیریابی تنظیم‌نشده)"}
+            </Badge>
+          )}
+        </div>
         <p className="text-sm text-muted-foreground">
           محصول‌هایی که از جست‌وجو اضافه کردی اینجا جمع می‌شوند. موقعیتت را مشخص کن، برنامه را بساز،
-          و برای هر توقف مسیر رسیدن در گوگل مپ و فاصله را ببین. مسیر روی نقشه شماتیک است (فاصلهٔ هوایی)،
-          ولی لینک مپ واقعی است.
+          و برای هر توقف مسیر رسیدن در گوگل مپ و فاصله را ببین.{" "}
+          {routingMode === "real_road"
+            ? "مسیرها بر اساس مسیریابی واقعی جاده‌ای (نشان) محاسبه می‌شوند."
+            : "مسیر روی نقشه شماتیک است (فاصلهٔ هوایی)، ولی لینک مپ واقعی است."}
         </p>
       </header>
 
@@ -201,13 +208,24 @@ export function TripView() {
             هنوز محصولی اضافه نکردی. از تب «جست‌وجو» محصول‌ها را پیدا کن و «افزودن به برنامهٔ خرید» را بزن.
           </p>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-col gap-2">
             {cartItems.map((i) => (
-              <Badge key={i.product_id} variant="secondary" className="gap-1 py-1.5">
-                <span className="line-clamp-1 max-w-48">{i.title}</span>
-                {i.min_price_toman !== null && <span className="font-num text-muted-foreground">• {formatToman(i.min_price_toman)}</span>}
-                <button type="button" onClick={() => removeFromCart(i.product_id)} aria-label="حذف از سبد" className="mr-0.5"><Trash2 className="size-3" aria-hidden /></button>
-              </Badge>
+              <div key={i.product_id} className="flex items-center gap-3 rounded-lg border border-border bg-card p-2">
+                {i.image_url ? (
+                  <img src={i.image_url} alt={i.title} loading="lazy" className="size-12 shrink-0 rounded-md object-cover" />
+                ) : (
+                  <span className="flex size-12 shrink-0 items-center justify-center rounded-md bg-muted"><Store className="size-5 text-muted-foreground" aria-hidden /></span>
+                )}
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span className="line-clamp-2 text-xs font-medium leading-tight">{i.title}</span>
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                    {i.min_price_toman !== null && <span className="font-num font-semibold text-primary">{formatToman(i.min_price_toman)}</span>}
+                    {i.offer_count !== undefined && <Badge variant="outline" className="font-num text-[10px]">{toPersianDigits(i.offer_count)} پیشنهاد</Badge>}
+                    {i.nearest_shop_name && <span className="line-clamp-1">• نزدیک‌ترین: {i.nearest_shop_name}</span>}
+                  </div>
+                </div>
+                <button type="button" onClick={() => removeFromCart(i.product_id)} aria-label={`حذف ${i.title} از سبد`} className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"><Trash2 className="size-4" aria-hidden /></button>
+              </div>
             ))}
           </div>
         )}
@@ -274,23 +292,27 @@ export function TripView() {
             <p className="text-sm text-amber-600">هیچ فروشگاهی برای این محصولات پیدا نشد. محصولات را عوض کن یا حداکثر توقف‌ها را زیاد کن.</p>
           ) : (
             <>
-              {/* schematic route map */}
-              {points.length > 0 && (
-                <div className="rounded-lg border border-border bg-muted/20 p-2">
-                  <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="h-auto w-full" role="img" aria-label="مسیر شماتیک خرید">
-                    <rect x={0} y={0} width={VB_W} height={VB_H} className="fill-muted/30" />
-                    <rect x={PAD} y={PAD} width={VB_W - 2 * PAD} height={VB_H - 2 * PAD} rx={16} className="fill-background stroke-border" strokeWidth={2} />
-                    {pathD && <path d={pathD} fill="none" className="stroke-primary" strokeWidth={2.5} strokeDasharray="6 6" />}
-                    {points.map((p, i) => (
-                      <g key={i} transform={`translate(${p.x}, ${p.y})`}>
-                        <circle r={p.isStart ? 6 : 5} className={p.isStart ? "fill-emerald-600" : "fill-primary"} />
-                        <text x={8} y={-6} className="fill-foreground text-[11px]" style={{ fontFamily: "var(--font-vazirmatn), sans-serif" }}>{p.isStart ? "شروع" : `توقف ${toPersianDigits(i)}`}</text>
-                      </g>
-                    ))}
-                  </svg>
-                  <p className="mt-1 text-[11px] text-muted-foreground">مسیر شماتیک (فاصلهٔ هوایی) — برای مسیر واقعی از لینک مپ هر توقف استفاده کن.</p>
-                </div>
-              )}
+              {/* Interactive OpenStreetMap (Leaflet) showing the start + all
+                  stops as markers + a dashed polyline connecting them in order.
+                  No API key needed. Replaces the old crude SVG schematic. */}
+              {(() => {
+                const mapStops: MapStop[] = [];
+                if (loc) {
+                  mapStops.push({ lat: loc.lat, lon: loc.lon, label: loc.label, isStart: true, subtitle: "موقعیت شروع شما" });
+                }
+                orderedPlan.forEach((stop, idx) => {
+                  if (stop.shop.lat !== null && stop.shop.lon !== null) {
+                    mapStops.push({
+                      lat: stop.shop.lat!,
+                      lon: stop.shop.lon!,
+                      label: stop.shop.name,
+                      subtitle: `توقف ${idx + 1} • ${stop.items.length} کالا • ${formatToman(stop.subtotal_toman)}`,
+                    });
+                  }
+                });
+                if (mapStops.length >= 1) return <RouteMap stops={mapStops} />;
+                return null;
+              })()}
 
               <ol className="grid gap-2">
                 {orderedPlan.map((stop, idx) => {

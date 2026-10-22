@@ -32,17 +32,18 @@ import type { ShopItem } from "./types";
  * confirmation states, and seller-contact workflow.
  *
  * Confirmation states (Phase 5 §6):
- * - "unconfirmed" → gray badge "تأییدنشده"
+ * - "unconfirmed" → gray badge "قیمت ثبت‌شده (تأییدنشده)"
  * - "pending" → amber badge "در انتظار پاسخ"
- * - "confirmed" → green badge "تأیید شد"
+ * - "confirmed" → green badge "تأیید فروشنده"
  * - "no_response" → red badge "پاسخ دریافت نشد"
+ * - "unavailable" → red badge "ناموجود" (seller confirmed out of stock)
  *
  * Never assumes a shop has stock, is open, or offers installments
  * without verified data. Shows "نامشخص" for unknown fields.
  */
 
 interface SellerConfirmState {
-  status: "unconfirmed" | "pending" | "confirmed" | "no_response";
+  status: "unconfirmed" | "pending" | "confirmed" | "no_response" | "unavailable";
   confirmedPrice: string;
   inStock: boolean | null;
   note: string;
@@ -59,11 +60,13 @@ export function ShopCard({
     ? `https://www.google.com/maps/search/?api=1&query=${shop.lat},${shop.lon}`
     : null;
   const today = shop.today_hours;
+  // Phase G: label open/closed as "based on recorded hours", NOT live verification.
+  // The dataset has weekly_hours but does NOT confirm the shop is actually open right now.
   const openLabel = today
     ? shop.open_now === true
-      ? `باز • تا ${toPersianDigits(today.close || "")}`
+      ? `باز (ساعات ثبت‌شده) • تا ${toPersianDigits(today.close || "")}`
       : shop.open_now === false
-        ? today.status === "closed" ? "امروز تعطیل" : `بسته • از ${toPersianDigits(today.open || "")}`
+        ? today.status === "closed" ? "امروز تعطیل (ساعات ثبت‌شده)" : `بسته (ساعات ثبت‌شده) • از ${toPersianDigits(today.open || "")}`
         : "ساعت کاری نامشخص"
     : "ساعت کاری نامشخص";
 
@@ -126,30 +129,22 @@ export function ShopCard({
   };
 
   const statusBadge = {
-    unconfirmed: { label: "تأییدنشده", cls: "bg-muted text-muted-foreground" },
+    unconfirmed: { label: "قیمت ثبت‌شده (تأییدنشده)", cls: "bg-muted text-muted-foreground" },
     pending: { label: "در انتظار پاسخ", cls: "bg-amber-500/15 text-amber-700" },
-    confirmed: { label: "تأیید شد ✓", cls: "bg-emerald-600 text-white" },
+    confirmed: { label: "تأیید فروشنده ✓", cls: "bg-emerald-600 text-white" },
     no_response: { label: "پاسخ دریافت نشد", cls: "bg-destructive text-white" },
+    unavailable: { label: "ناموجود", cls: "bg-red-500/15 text-red-700" },
   }[confirmState.status];
 
   return (
     <motion.div whileHover={{ y: -2 }} transition={{ type: "spring", stiffness: 300, damping: 22 }}>
-      <Card className="h-full gap-3 p-4">
-        {/* Header: name + badges */}
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div className="flex items-start gap-2">
-            <div className="rounded-md bg-primary/10 p-2 text-primary"><Store className="size-4" aria-hidden /></div>
-            <div>
-              <h3 className="text-sm font-semibold leading-relaxed">{shop.name}</h3>
-              {shop.name_is_synthetic_warning && <SyntheticNameBadge />}
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {shop.supports_fast_delivery && <Badge className="gap-1 bg-emerald-600 text-white hover:bg-emerald-600"><Zap className="size-3" aria-hidden />ارسال سریع</Badge>}
-            {shop.has_installment && <Badge className="gap-1 bg-amber-600 text-white hover:bg-amber-600"><CreditCard className="size-3" aria-hidden />قسطی</Badge>}
-            <Badge variant={shop.open_now === true ? "default" : shop.open_now === false ? "destructive" : "secondary"} className="gap-1">
-              <Clock className="size-3" aria-hidden />{openLabel}
-            </Badge>
+      <Card className="h-full gap-3 p-5">
+        {/* Header: name + synthetic badge */}
+        <div className="flex items-start gap-2">
+          <div className="shrink-0 rounded-md bg-primary/10 p-2 text-primary"><Store className="size-5" aria-hidden /></div>
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <h3 className="text-base font-semibold leading-tight">{shop.name}</h3>
+            {shop.name_is_synthetic_warning && <SyntheticNameBadge />}
           </div>
         </div>
 
@@ -160,16 +155,32 @@ export function ShopCard({
           <p className="text-xs text-muted-foreground">آدرس: اطلاعات موجود نیست</p>
         )}
 
-        {/* Offer + distance info */}
-        <div className="flex flex-wrap gap-1.5">
-          {shop.location_label && <Badge variant="outline">{shop.location_label}</Badge>}
+        {/* Hours — full row, larger + clearer (was cramped in the top bar) */}
+        <div className="flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2 text-sm">
+          <Clock className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <span className={
+            shop.open_now === true
+              ? "font-medium text-emerald-600"
+              : shop.open_now === false
+                ? "font-medium text-destructive"
+                : "text-muted-foreground"
+          }>
+            {openLabel}
+          </span>
+        </div>
+
+        {/* Offer + distance + installment badges — wrapped, larger */}
+        <div className="flex flex-wrap gap-2">
+          {shop.location_label && <Badge variant="outline" className="text-xs">{shop.location_label}</Badge>}
           {shop.distance_km !== null ? (
-            <Badge variant="secondary" className="font-num gap-1"><Navigation className="size-3" aria-hidden />{formatDistanceKm(shop.distance_km)}</Badge>
+            <Badge variant="secondary" className="gap-1 font-num text-xs"><Navigation className="size-3" aria-hidden />{formatDistanceKm(shop.distance_km)}</Badge>
           ) : (
-            <Badge variant="outline" className="gap-1"><Navigation className="size-3" aria-hidden />فاصله نامشخص</Badge>
+            <Badge variant="outline" className="gap-1 text-xs"><Navigation className="size-3" aria-hidden />فاصله نامشخص</Badge>
           )}
-          <Badge variant="outline" className="font-num">{toPersianDigits(shop.matching_offers)} پیشنهاد منطبق</Badge>
-          {shop.best_price_toman !== null && shop.best_price_toman !== undefined && <Badge variant="secondary" className="font-num">قیمت ثبت‌شده: {formatToman(shop.best_price_toman)}</Badge>}
+          <Badge variant="outline" className="font-num text-xs">{toPersianDigits(shop.matching_offers)} پیشنهاد منطبق</Badge>
+          {shop.best_price_toman !== null && shop.best_price_toman !== undefined && <Badge variant="secondary" className="font-num text-xs">قیمت ثبت‌شده: {formatToman(shop.best_price_toman)}</Badge>}
+          {shop.supports_fast_delivery && <Badge className="gap-1 bg-emerald-600 text-xs text-white hover:bg-emerald-600"><Zap className="size-3" aria-hidden />ارسال سریع</Badge>}
+          {shop.has_installment && <Badge title="بر اساس دادهٔ ثبت‌شده — قبل از مراجعه تأیید کنید" className="gap-1 bg-amber-600 text-xs text-white hover:bg-amber-600"><CreditCard className="size-3" aria-hidden />اقساط (ثبت‌شده)</Badge>}
         </div>
 
         {/* Confirmation status badge */}
@@ -227,17 +238,19 @@ export function ShopCard({
             </div>
             <div className="mt-2 flex flex-wrap gap-1.5">
               <Button type="button" size="sm" className="h-9 gap-1.5 bg-emerald-600 text-white hover:bg-emerald-600" disabled={saving} onClick={() => saveConfirmation("confirmed")}>
-                <ShieldCheck className="size-3.5" aria-hidden />تأیید شد
+                <ShieldCheck className="size-3.5" aria-hidden />تأیید فروشنده
               </Button>
               <Button type="button" variant="outline" size="sm" className="h-9" disabled={saving} onClick={() => saveConfirmation("pending")}>در انتظار</Button>
               <Button type="button" variant="outline" size="sm" className="h-9" disabled={saving} onClick={() => saveConfirmation("no_response")}>پاسخی نیامد</Button>
+              <Button type="button" variant="outline" size="sm" className="h-9" disabled={saving} onClick={() => saveConfirmation("unavailable")}>ناموجود</Button>
             </div>
             {confirmState.status !== "unconfirmed" && (
               <p className="mt-1 text-[11px] text-muted-foreground">
-                {confirmState.status === "confirmed" ? "قیمت و موجودی توسط شما تأیید شد (در همین نشست)." : confirmState.status === "no_response" ? "فروشنده پاسخ نداد — فروشگاه‌های جایگزین را ببینید." : "در انتظار پاسخ فروشنده."}
+                {confirmState.status === "confirmed" ? "قیمت و موجودی توسط شما تأیید شد (در همین نشست)." : confirmState.status === "no_response" ? "فروشنده پاسخ نداد — فروشگاه‌های جایگزین را ببینید." : confirmState.status === "unavailable" ? "ناموجود — جایگزین‌های مرتبط را ببینید." : "در انتظار پاسخ فروشنده."}
               </p>
             )}
             <p className="mt-1 text-[11px] text-amber-600">قیمت‌ها ممکن است قدیمی باشند. ثبت‌ها فقط همین نشست نگه‌داری می‌شوند.</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">ارسال خودکار پیام به فروشنده پیکربندی‌نشده است (not_configured) — متن را کپی کن و خودت ارسال کن.</p>
           </div>
         )}
 

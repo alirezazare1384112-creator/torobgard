@@ -145,12 +145,20 @@ export interface AlternativesResponse {
   alternatives: AlternativeItem[];
 }
 
+/** Response from /api/agent. Mirrors AgentResponseBody in api/agent/route.ts.
+ *  `generative` carries typed UI payloads (question/budget/preference) the
+ *  frontend renders as structured cards — never raw HTML. `session` is the
+ *  persisted shopping context (sent back each turn). `fallback=true` means
+ *  the deterministic no-LLM path produced the reply. */
 export interface AgentResponse {
   reply: string;
   tool: string | null;
   tool_args: Record<string, unknown> | null;
   tool_result: unknown;
   tool_error: string | null;
+  generative?: unknown | null;
+  session?: unknown | null;
+  fallback?: boolean;
   error?: string;
   code?: string;
 }
