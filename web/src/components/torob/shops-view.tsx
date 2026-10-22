@@ -137,6 +137,36 @@ export function ShopsView({
         </Button>
       </form>
 
+      {/* Neighborhood quick-select chips (inspired by Stitch UI).
+          Selecting a chip immediately applies it as the near filter. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setDraft({ ...draft, near: "all" })}
+          className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+            draft.near === "all"
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-border bg-card text-muted-foreground hover:bg-accent"
+          }`}
+        >
+          همه تهران
+        </button>
+        {NEIGHBORHOODS.map((n) => (
+          <button
+            key={n}
+            type="button"
+            onClick={() => setDraft({ ...draft, near: n })}
+            className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+              draft.near === n
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border bg-card text-muted-foreground hover:bg-accent"
+            }`}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[260px_1fr]">
         <aside className="lg:sticky lg:top-20 lg:self-start">
           <Card className="flex flex-col gap-4 p-4">

@@ -165,17 +165,18 @@ ok("trip: 400 code is validation_error", badJson.body?.code === "validation_erro
 const negLimit = await get("/api/search?q=ماوس&limit=-5");
 ok("search: negative limit → 400 (validateFilters rejects)", negLimit.status === 400 || negLimit.status === 200, { status: negLimit.status });
 
-// 2l. Routing endpoint — not_configured status
+// 2l. Routing endpoint — now uses OSRM (real road routing, no API key needed).
 const routeStatus = await get("/api/route");
 ok("route: GET status → 200", routeStatus.status === 200);
-ok("route: reports configured: false (Neshan not set)", routeStatus.body?.configured === false);
-ok("route: mode is straight_line_estimate", routeStatus.body?.mode === "straight_line_estimate");
+ok("route: provider is osrm (free, no API key)", routeStatus.body?.provider === "osrm");
+ok("route: mode is real_road", routeStatus.body?.mode === "real_road");
 
 const routePlan = await post("/api/route", { stops: [{ lat: 35.7467, lon: 51.336, label: "صادقیه" }, { lat: 35.695, lon: 51.407, label: "shop" }] });
 ok("route: POST 2 stops → 200", routePlan.status === 200);
-ok("route: has_real_routing = false (fallback)", routePlan.body?.has_real_routing === false);
-ok("route: segment is_estimated = true", routePlan.body?.segments?.[0]?.is_estimated === true);
+ok("route: has_real_routing = true (OSRM)", routePlan.body?.has_real_routing === true);
+ok("route: segment is_estimated = false (real road)", routePlan.body?.segments?.[0]?.is_estimated === false);
 ok("route: distance > 0", (routePlan.body?.segments?.[0]?.distance_meters ?? 0) > 0);
+ok("route: geometry has points (real road path)", (routePlan.body?.segments?.[0]?.geometry?.length ?? 0) > 50);
 
 // 2m. Seller inquiry (prepare message, NOT auto-send)
 const inquiry = await post("/api/inquiry", { shop_id: "shop_8af5bb9a7a64bcbc793a6c0f", product_id: "product_74717ad8e2406094437ecdb5", ask_installment: true });

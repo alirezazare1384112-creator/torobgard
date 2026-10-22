@@ -10,18 +10,21 @@ interface StopInput {
   label?: string;
 }
 
-/** POST /api/route — compute a multi-stop route using the Neshan routing
- *  adapter when NESHAN_API_KEY is configured, otherwise haversine
- *  straight-line distances with is_estimated=true. Never fabricates road
- *  distances when no provider is configured.
+/** POST /api/route — compute a multi-stop driving route with optional TSP
+ *  ordering. Uses OSRM (free, no API key) for the road network + geometry.
+ *  Falls back to Neshan (if NESHAN_API_KEY set), then to haversine straight-line.
  *
- *  Body: { stops: [{lat, lon, label?}] }
- *  Returns: RoutePlan { segments[], total_distance_meters, total_duration_seconds,
- *                       has_real_routing, error }
- *
- *  When the Neshan key is missing (the current environment), every segment
- *  has is_estimated=true and has_real_routing=false — the frontend must
- *  display these as straight-line estimates, not driving distances. */
+ *  Body: {
+ *    stops: [{lat, lon, label?}],   // first element = start (user location)
+ *    optimize?: boolean              // if true, reorder stops via nearest-neighbor + 2-opt
+ *  }
+ *  Returns: RoutePlan with:
+ *    - segments[]: each has distance_meters, duration_seconds, geometry (OSRM)
+ *    - total_distance_meters, total_duration_seconds
+ *    - has_real_routing (true if all segments are real road, false if any fallback)
+ *    - provider: "osrm" | "neshan" | "haversine"
+ *    - ordered_stops: the actual visit order (after TSP optimization)
+ */
 export async function POST(req: Request) {
   let body: any;
   try {
@@ -62,9 +65,11 @@ export async function POST(req: Request) {
     lon: Number(s.lon),
     label: typeof s.label === "string" ? s.label : `${Number(s.lat).toFixed(4)},${Number(s.lon).toFixed(4)}`,
   }));
+  const optimize = body?.optimize === true;
   try {
     const plan: RoutePlan = await computeRoute(
-      cleanStops.map((s) => ({ lat: s.lat, lon: s.lon, label: s.label as string }))
+      cleanStops.map((s) => ({ lat: s.lat, lon: s.lon, label: s.label as string })),
+      { optimize }
     );
     return NextResponse.json(plan);
   } catch (e) {
@@ -77,14 +82,16 @@ export async function POST(req: Request) {
   }
 }
 
-/** GET /api/route — returns the configuration status of the routing provider.
- *  Lets the frontend show whether real road routing is available without
- *  making a full routing call. */
+/** GET /api/route — returns the configuration status of the routing provider. */
 export async function GET() {
   return NextResponse.json({
-    provider: "neshan",
-    configured: isNeshanConfigured(),
-    // when not configured, all distances are straight-line (haversine) estimates
-    mode: isNeshanConfigured() ? "real_road" : "straight_line_estimate",
+    provider: isNeshanConfigured() ? "neshan" : "osrm",
+    neshan_configured: isNeshanConfigured(),
+    osrm_available: true,
+    // when neshan not configured, we use OSRM (real road routing, free)
+    mode: "real_road",
+    note: isNeshanConfigured()
+      ? "Using Neshan Maps (Iran-focused)"
+      : "Using OSRM public server (real road routing, no API key needed)",
   });
 }

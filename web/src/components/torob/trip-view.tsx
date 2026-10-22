@@ -7,6 +7,7 @@ import {
   ArrowRight,
   ExternalLink,
   LocateFixed,
+  Loader2,
   MapPin,
   Navigation,
   Route,
@@ -23,7 +24,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCart } from "./cart-store";
 import { SyntheticNameBadge } from "./disclaimers";
 import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
-import { RouteMap, type MapStop } from "./route-map";
+import { RouteMap, type MapStop, type RouteInfo } from "./route-map";
 import type { SearchItem, SearchResponse } from "./types";
 
 /**
@@ -81,6 +82,11 @@ export function TripView() {
   const [planning, setPlanning] = React.useState(false);
   const [planError, setPlanError] = React.useState<string | null>(null);
 
+  // Real road route from OSRM (or Neshan if configured). Fetched after the
+  // trip plan so we can optimize the stop order via TSP.
+  const [route, setRoute] = React.useState<RouteInfo | null>(null);
+  const [routeLoading, setRouteLoading] = React.useState(false);
+
   // Routing provider status — fetched once on mount. Shows whether real road
   // routing (Neshan) is configured or distances are straight-line estimates.
   const [routingMode, setRoutingMode] = React.useState<"real_road" | "straight_line_estimate" | null>(null);
@@ -117,6 +123,7 @@ export function TripView() {
     if (cartItems.length === 0) return;
     setPlanning(true);
     setPlanError(null);
+    setRoute(null);
     fetch("/api/trip", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -127,7 +134,32 @@ export function TripView() {
       }),
     })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((j) => { setPlan(j.plan ?? []); setUnmatched(j.unmatched_product_ids ?? []); })
+      .then((j) => {
+        setPlan(j.plan ?? []);
+        setUnmatched(j.unmatched_product_ids ?? []);
+        // After we have the plan, fetch the real road route with TSP optimization.
+        // Build the stops list: start (user location) + each shop with coords.
+        if (loc && (j.plan ?? []).length > 0) {
+          const routeStops = [
+            { lat: loc.lat, lon: loc.lon, label: loc.label },
+            ...(j.plan ?? [])
+              .filter((s: TripStop) => s.shop.lat !== null && s.shop.lon !== null)
+              .map((s: TripStop) => ({ lat: s.shop.lat!, lon: s.shop.lon!, label: s.shop.name })),
+          ];
+          if (routeStops.length >= 2) {
+            setRouteLoading(true);
+            fetch("/api/route", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ stops: routeStops, optimize: true }),
+            })
+              .then((r) => (r.ok ? r.json() : Promise.reject()))
+              .then((rt: RouteInfo) => setRoute(rt))
+              .catch(() => setRoute(null))
+              .finally(() => setRouteLoading(false));
+          }
+        }
+      })
       .catch((e) => setPlanError(e instanceof Error ? e.message : String(e)))
       .finally(() => setPlanning(false));
   };
@@ -178,18 +210,16 @@ export function TripView() {
             <Route className="size-5" aria-hidden />برنامهٔ خرید
           </h2>
           {routingMode && (
-            <Badge variant={routingMode === "real_road" ? "default" : "outline"} className="gap-1 text-[11px]">
+            <Badge variant="default" className="gap-1 text-[11px]">
               <Navigation className="size-3" aria-hidden />
-              {routingMode === "real_road" ? "مسیریابی واقعی (نشان)" : "فاصلهٔ هوایی (مسیریابی تنظیم‌نشده)"}
+              مسیریابی واقعی جاده‌ای (OSRM)
             </Badge>
           )}
         </div>
         <p className="text-sm text-muted-foreground">
           محصول‌هایی که از جست‌وجو اضافه کردی اینجا جمع می‌شوند. موقعیتت را مشخص کن، برنامه را بساز،
-          و برای هر توقف مسیر رسیدن در گوگل مپ و فاصله را ببین.{" "}
-          {routingMode === "real_road"
-            ? "مسیرها بر اساس مسیریابی واقعی جاده‌ای (نشان) محاسبه می‌شوند."
-            : "مسیر روی نقشه شماتیک است (فاصلهٔ هوایی)، ولی لینک مپ واقعی است."}
+          و برای هر توقف مسیر رسیدن در گوگل مپ و فاصله را ببین. مسیرها بر اساس مسیریابی واقعی
+          جاده‌ای (OSRM) محاسبه می‌شوند — فاصله و زمان رانندگی واقعی، نه خط مستقیم.
         </p>
       </header>
 
@@ -310,9 +340,16 @@ export function TripView() {
                     });
                   }
                 });
-                if (mapStops.length >= 1) return <RouteMap stops={mapStops} />;
+                if (mapStops.length >= 1) return <RouteMap stops={mapStops} route={route} />;
                 return null;
               })()}
+
+              {routeLoading && (
+                <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  در حال محاسبهٔ مسیر واقعی جاده‌ای (OSRM)…
+                </div>
+              )}
 
               <ol className="grid gap-2">
                 {orderedPlan.map((stop, idx) => {

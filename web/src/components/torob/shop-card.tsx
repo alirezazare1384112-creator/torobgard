@@ -23,7 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { SyntheticNameBadge } from "./disclaimers";
+import { SyntheticNameBadge, VerificationBadge, FloorUnitBadge } from "./disclaimers";
 import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
 import type { ShopItem } from "./types";
 
@@ -128,13 +128,8 @@ export function ShopCard({
     setSaving(false);
   };
 
-  const statusBadge = {
-    unconfirmed: { label: "قیمت ثبت‌شده (تأییدنشده)", cls: "bg-muted text-muted-foreground" },
-    pending: { label: "در انتظار پاسخ", cls: "bg-amber-500/15 text-amber-700" },
-    confirmed: { label: "تأیید فروشنده ✓", cls: "bg-emerald-600 text-white" },
-    no_response: { label: "پاسخ دریافت نشد", cls: "bg-destructive text-white" },
-    unavailable: { label: "ناموجود", cls: "bg-red-500/15 text-red-700" },
-  }[confirmState.status];
+  // Map our internal confirmState to the VerificationBadge status type.
+  const verificationStatus = confirmState.status === "unconfirmed" ? "recorded" : confirmState.status;
 
   return (
     <motion.div whileHover={{ y: -2 }} transition={{ type: "spring", stiffness: 300, damping: 22 }}>
@@ -148,9 +143,12 @@ export function ShopCard({
           </div>
         </div>
 
-        {/* Address — only if it exists */}
+        {/* Address + floor/unit badge (if address mentions طبقه/پلاک/واحد) */}
         {shop.address ? (
-          <p className="flex items-start gap-2 text-xs text-muted-foreground"><MapPin className="mt-0.5 size-3.5 shrink-0" aria-hidden /><span className="leading-relaxed">{shop.address}</span></p>
+          <div className="flex flex-col gap-1.5">
+            <p className="flex items-start gap-2 text-xs text-muted-foreground"><MapPin className="mt-0.5 size-3.5 shrink-0" aria-hidden /><span className="leading-relaxed">{shop.address}</span></p>
+            <FloorUnitBadge address={shop.address} />
+          </div>
         ) : (
           <p className="text-xs text-muted-foreground">آدرس: اطلاعات موجود نیست</p>
         )}
@@ -183,11 +181,9 @@ export function ShopCard({
           {shop.has_installment && <Badge title="بر اساس دادهٔ ثبت‌شده — قبل از مراجعه تأیید کنید" className="gap-1 bg-amber-600 text-xs text-white hover:bg-amber-600"><CreditCard className="size-3" aria-hidden />اقساط (ثبت‌شده)</Badge>}
         </div>
 
-        {/* Confirmation status badge */}
+        {/* Verification status badge (inspired by Stitch UI) */}
         <div className="flex items-center gap-2">
-          <Badge className={statusBadge.cls + " gap-1"}>
-            <ShieldCheck className="size-3" aria-hidden />{statusBadge.label}
-          </Badge>
+          <VerificationBadge status={verificationStatus} />
           {confirmState.status === "confirmed" && confirmState.confirmedPrice && (
             <span className="text-xs text-emerald-600">قیمت تأییدشده: {formatToman(Number(confirmState.confirmedPrice))}</span>
           )}
