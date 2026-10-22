@@ -71,7 +71,7 @@ export function HomeView({
         <Badge variant="secondary" className="gap-1">
           <Store className="size-3" aria-hidden />دستیار خرید حضوری تهران
         </Badge>
-        <h1 className="text-4xl font-extrabold tracking-tight sm:text-6xl">طرب‌گارد</h1>
+        <h1 className="text-4xl font-extrabold tracking-tight sm:text-6xl">ترب‌گرد</h1>
         <p className="max-w-2xl text-balance text-base text-foreground sm:text-xl">
           چی لازم داری؟ با هم پیداش می‌کنیم.
         </p>

@@ -1,10 +1,9 @@
-# Tehran Shopping Agent (طرب‌گارد)
+# Tehran Shopping Agent (ترب‌گرد)
 
 A Persian shopping assistant for Tehran, grounded entirely in the Torob dataset.
 Search, filters, offer comparison, and shop discovery run without any LLM, and a
 Persian RTL web UI plus an optional LLM shopping agent sit on top of the same data.
 
-<<<<<<< HEAD
 **Status:** Phase 1–2 (data audit, import, core tools, tests) **+ Phase 3 (Persian RTL
 Next.js frontend, TypeScript tool port, LLM agent UI)**.
 
@@ -23,9 +22,6 @@ This repo has two layers that share one SQLite database:
 The `web/` app ports `tehran_agent/tools.py` to TypeScript and reads the same
 `data/torob.sqlite` produced by `tehran_agent/importer.py` — so the real dataset
 drops in with no code changes. See [`web/README.md`](web/README.md) for run steps.
-=======
-**Status:** Phase 3 ready (data audit, import, core tools, HTTP API, tests). Frontend and agent UI are not built yet.
->>>>>>> feat/api-and-dataset
 
 ## Dataset setup
 
@@ -55,7 +51,6 @@ python -m unittest discover -s tests -v
 python -m tehran_agent.api --db data/torob.sqlite --host 127.0.0.1 --port 8000
 ```
 
-<<<<<<< HEAD
 ## Run the web frontend
 
 ```bash
@@ -68,19 +63,6 @@ bun run dev   # http://localhost:3000
 
 See [`web/README.md`](web/README.md) for details, including how to use the real
 dataset and the phrase-match fix for «ماوس بی‌سیم» vs «ماوس با سیم».
-=======
-Open: [http://127.0.0.1:8000](http://127.0.0.1:8000)
-
-Useful endpoints:
-- `/health`
-- `/api/meta`
-- `/api/search?q=ماوس+بی+سیم&max_price=1000000&limit=10`
-- `/api/product/<product_id>`
-- `/api/compare/<product_id>?sort=distance&near=صادقیه&radius_km=5`
-- `/api/shops?sort=matching_offers&category=هدفون، هدست و هندزفری`
-- `/api/alternatives/<product_id>?budget_toman=3000000&limit=8`
-- `/api/trip?product_id=<id1>&product_id=<id2>&near=صادقیه&max_shops=2`
->>>>>>> feat/api-and-dataset
 
 ## Layout
 

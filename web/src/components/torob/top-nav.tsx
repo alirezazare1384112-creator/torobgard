@@ -38,11 +38,11 @@ export function TopNav({ view, onView }: { view: NavBarView; onView: (v: NavBarV
     <header className="sticky top-0 z-30 border-b border-border bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-2.5">
         {/* Logo */}
-        <button type="button" onClick={() => onView("home")} className="flex shrink-0 items-center gap-2" aria-label="طرب‌گارد — خانه">
+        <button type="button" onClick={() => onView("home")} className="flex shrink-0 items-center gap-2" aria-label="ترب‌گرد — خانه">
           <span className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
             <Store className="size-5" aria-hidden />
           </span>
-          <span className="hidden text-lg font-extrabold tracking-tight sm:inline">طرب‌گارد</span>
+          <span className="hidden text-lg font-extrabold tracking-tight sm:inline">ترب‌گرد</span>
         </button>
 
         {/* Tabs — desktop */}
