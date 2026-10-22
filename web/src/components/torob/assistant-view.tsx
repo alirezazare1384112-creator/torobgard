@@ -8,19 +8,15 @@ import {
   ArrowRight,
   Bot,
   Check,
-  CheckCircle2,
   ChevronDown,
   Clock,
   Copy,
   GitCompareArrows,
-  HelpCircle,
   Loader2,
   MapPin,
-  MessageCircle,
   Package,
   Phone,
   Plus,
-  Route,
   Send,
   ShieldCheck,
   Sparkles,
@@ -36,24 +32,17 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useCart } from "./cart-store";
-import { SyntheticNameBadge } from "./disclaimers";
+import { SyntheticNameBadge, VerificationBadge } from "./disclaimers";
 import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
 import { GenerativeMessage, type GenerativePayload } from "./generative-ui";
 import { createSession, updateSession, type ShoppingSession } from "@/lib/torob/session";
-import { sanitizeText } from "@/lib/torob/moderation";
-import type { AgentStep, Suggestion } from "@/lib/torob/agent-types";
-import { ShopCard } from "./shop-card";
-import type { SearchItem, ShopItem } from "./types";
+import type { AgentResponse, SearchItem } from "./types";
 
 /**
- * Unified "دستیار خرید" view — a multi-step agentic chat.
- *
- * The agent server runs a ReAct loop (search → compare → trip → answer) and
- * streams each executed step to this UI as NDJSON events, so the user watches
- * the assistant think: every tool call, its Persian reasoning, and its result
- * appear live. Inline product cards, shop cards and offer-verify panels render
- * from the last data-bearing tool result; suggestion chips offer the most
- * useful next action.
+ * Unified "دستیار خرید" view — merges the conversational agent with the
+ * explore/compare flow. Conversation is the spine; product picks and shop
+ * offers render inline. A "مقایسه کنار هم" drawer opens when the user has
+ * picked 2+ products from chat results.
  */
 
 interface ChatMessage {
@@ -66,14 +55,11 @@ interface ChatMessage {
   toolError?: string | null;
   generative?: GenerativePayload | null;
   fallback?: boolean;
-  steps?: AgentStep[];
-  suggestions?: Suggestion[];
-  streaming?: boolean;
 }
 
 const STARTERS = [
   "یه کفش کتونی برای دانشگاه و پیاده‌روی می‌خوام زیر ۴ میلیون",
-  "ارزون‌ترین ماوس بی‌سیم زیر ۱ میلیون رو پیدا کن و بگو کجا بخرم",
+  "ارزون‌ترین ماوس بی‌سیم زیر ۱ میلیون",
   "فروشگاه موبایل نزدیک صادقیه که قسطی داره",
   "برنامه خرید ماوس و کیبورد و هدفون",
 ];
@@ -101,118 +87,36 @@ function extractOffers(r: unknown): any[] {
   if (!r || typeof r !== "object") return [];
   return Array.isArray((r as any).offers) ? (r as any).offers : [];
 }
-function extractShops(r: unknown): ShopItem[] {
-  if (!r || typeof r !== "object") return [];
-  return Array.isArray((r as any).shops) ? (r as any).shops : [];
-}
 
-/* ------------------------------------------------------------------ */
-/* Step trace — the agent's visible chain of thought                    */
-/* ------------------------------------------------------------------ */
-
-function StepIcon({ step }: { step: AgentStep }) {
-  if (step.status === "error") return <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />;
-  if (step.tool === "ask_user") return <MessageCircle className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />;
-  if (step.tool === "plan_shopping_trip") return <Route className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />;
-  if (step.tool === "search_products" || step.tool === "find_alternatives") return <Sparkles className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />;
-  if (step.tool === "compare_offers") return <GitCompareArrows className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />;
-  if (step.tool === "find_shops") return <Store className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />;
-  if (step.tool === "check_shop_hours") return <Clock className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />;
-  return <Wrench className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />;
-}
-
-function StepTrace({ steps, streaming, expanded }: { steps: AgentStep[]; streaming?: boolean; expanded?: boolean }) {
-  if (!steps.length) return null;
-  const okCount = steps.filter((s) => s.status === "ok").length;
-  return (
-    <Collapsible defaultOpen={expanded} className="w-full">
-      <div className="flex flex-col gap-1.5">
-        <ol className="flex flex-col gap-1.5">
-          {steps.map((s) => (
-            <li key={`${s.index}-${s.tool}`} className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-2.5 py-2">
-              <StepIcon step={s} />
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-[11px] font-medium leading-none">{s.label}</span>
-                  <span className="font-mono text-[9px] leading-none text-muted-foreground/70" dir="ltr">{s.tool}</span>
-                  {s.status === "ok" && <CheckCircle2 className="size-3 shrink-0 text-emerald-600" aria-hidden />}
-                </div>
-                {s.thinking && (
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">{s.thinking}</p>
-                )}
-                {s.status === "error" && s.error && (
-                  <p className="text-[11px] leading-relaxed text-destructive">خطا: {s.error}</p>
-                )}
-                <StepDetails step={s} />
-              </div>
-            </li>
-          ))}
-          {streaming && (
-            <li className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-muted/20 px-2.5 py-2 text-[11px] text-muted-foreground">
-              <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              در حال فکر کردن به قدم بعدی…
-            </li>
-          )}
-        </ol>
-        {!streaming && steps.length > 1 && (
-          <p className="pr-1 text-[10px] text-muted-foreground/70">
-            {toPersianDigits(okCount)} قدم موفق از {toPersianDigits(steps.length)} قدم
-          </p>
-        )}
-      </div>
-    </Collapsible>
-  );
-}
-
-function StepDetails({ step }: { step: AgentStep }) {
+function ToolCard({ msg }: { msg: ChatMessage }) {
   const [open, setOpen] = React.useState(false);
-  if (!step.args && step.observation === null && step.observation === undefined) return null;
+  if (!msg.tool && !msg.toolError) return null;
   return (
-    <Collapsible open={open} onOpenChange={setOpen}>
+    <Collapsible open={open} onOpenChange={setOpen} className="mt-2 rounded-lg border border-border bg-muted/30">
       <CollapsibleTrigger asChild>
-        <button type="button" className="flex items-center gap-1 text-[10px] text-muted-foreground transition-colors hover:text-foreground" aria-expanded={open}>
-          <ChevronDown className={`size-3 transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
-          جزئیات
+        <button type="button" className="flex w-full items-center justify-between gap-2 px-3 py-2 text-xs" aria-expanded={open}>
+          <span className="flex items-center gap-2 text-muted-foreground">
+            <Wrench className="size-3.5" aria-hidden />ابزار
+            {msg.tool && <Badge variant="outline" className="font-mono">{msg.tool}</Badge>}
+            {msg.toolError && <Badge className="gap-1 bg-destructive text-white"><AlertTriangle className="size-3" aria-hidden />خطا</Badge>}
+          </span>
+          <ChevronDown className={`size-3.5 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
         </button>
       </CollapsibleTrigger>
-      <CollapsibleContent>
-        {step.args && Object.keys(step.args).length > 0 && (
-          <div className="mt-1">
-            <p className="mb-0.5 text-[10px] text-muted-foreground">آرگومان‌ها:</p>
-            <pre className="scrollbar-thin max-h-32 overflow-auto rounded bg-background p-1.5 text-[10px] font-mono leading-relaxed" dir="ltr">{JSON.stringify(step.args, null, 2)}</pre>
+      <CollapsibleContent className="border-t border-border px-3 py-2">
+        {msg.toolError && <p className="mb-2 text-xs text-destructive">خطا: {msg.toolError}</p>}
+        {msg.toolArgs && Object.keys(msg.toolArgs).length > 0 && (
+          <div className="mb-2"><p className="mb-1 text-xs text-muted-foreground">آرگومان‌ها:</p>
+            <pre className="scrollbar-thin max-h-40 overflow-auto rounded bg-background p-2 text-xs font-mono" dir="ltr">{JSON.stringify(msg.toolArgs, null, 2)}</pre>
           </div>
         )}
-        {step.observation !== null && step.observation !== undefined && (
-          <div className="mt-1">
-            <p className="mb-0.5 text-[10px] text-muted-foreground">نتیجه (خلاصه):</p>
-            <pre className="scrollbar-thin max-h-40 overflow-auto rounded bg-background p-1.5 text-[10px] font-mono leading-relaxed" dir="ltr">{trimResult(step.observation)}</pre>
+        {msg.toolResult !== null && msg.toolResult !== undefined && (
+          <div><p className="mb-1 text-xs text-muted-foreground">نتیجه (خلاصه):</p>
+            <pre className="scrollbar-thin max-h-60 overflow-auto rounded bg-background p-2 text-xs font-mono" dir="ltr">{trimResult(msg.toolResult)}</pre>
           </div>
         )}
       </CollapsibleContent>
     </Collapsible>
-  );
-}
-
-/** Quick reply-copy affordance for finished assistant messages. */
-function CopyReplyButton({ text }: { text: string }) {
-  const [copied, setCopied] = React.useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch { /* clipboard unavailable */ }
-  };
-  return (
-    <button
-      type="button"
-      onClick={copy}
-      aria-label="کپی پاسخ"
-      title={copied ? "کپی شد" : "کپی پاسخ"}
-      className="mt-0.5 shrink-0 rounded-md p-1 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
-    >
-      {copied ? <Check className="size-3.5 text-emerald-600" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
-    </button>
   );
 }
 
@@ -325,13 +229,8 @@ function VerifyPanel({ offer }: { offer: any }) {
   };
 
   const phone = shop?.contacts?.find((c: any) => c.channel === "phone")?.display_number;
-  const statusBadge = {
-    unconfirmed: { label: "قیمت ثبت‌شده (تأییدنشده)", cls: "bg-muted text-muted-foreground" },
-    pending: { label: "در انتظار پاسخ", cls: "bg-amber-500/15 text-amber-700" },
-    confirmed: { label: "تأیید فروشنده ✓", cls: "bg-emerald-600 text-white" },
-    no_response: { label: "پاسخ دریافت نشد", cls: "bg-destructive text-white" },
-    unavailable: { label: "ناموجود", cls: "bg-red-500/15 text-red-700" },
-  }[status];
+  // Map our internal status to the VerificationBadge status type.
+  const verificationStatus = status === "unconfirmed" ? "recorded" : status;
 
   return (
     <div className="rounded-lg border border-border bg-card p-3">
@@ -339,7 +238,7 @@ function VerifyPanel({ offer }: { offer: any }) {
         <Store className="size-4 text-primary" aria-hidden />
         <span className="line-clamp-1 text-sm font-semibold">{shop?.name}</span>
         <SyntheticNameBadge />
-        <Badge className={statusBadge.cls}>{statusBadge.label}</Badge>
+        <VerificationBadge status={verificationStatus} />
         {shop?.has_installment && <Badge title="بر اساس دادهٔ ثبت‌شده — قبل از مراجعه تأیید کنید" className="gap-1 bg-amber-600 text-white"><Clock className="size-3" aria-hidden />اقساط (ثبت‌شده)</Badge>}
       </div>
       {shop?.address && <p className="mt-1 flex items-start gap-1.5 text-xs text-muted-foreground"><MapPin className="mt-0.5 size-3 shrink-0" aria-hidden /><span className="leading-relaxed">{shop.address}</span></p>}
@@ -394,123 +293,47 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
   // structured session state (persisted across turns)
   const [session, setSession] = React.useState<ShoppingSession | null>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  // keep the live message id so stream events can patch it
-  const liveIdRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, loading]);
 
-  const patchLive = React.useCallback((patch: Partial<ChatMessage> | ((prev: ChatMessage) => Partial<ChatMessage>)) => {
-    const id = liveIdRef.current;
-    if (!id) return;
-    setMessages((ms) =>
-      ms.map((m) => {
-        if (m.id !== id) return m;
-        const p = typeof patch === "function" ? patch(m) : patch;
-        return { ...m, ...p };
-      })
-    );
-  }, []);
-
-  const appendStep = React.useCallback((step: AgentStep) => {
-    const id = liveIdRef.current;
-    if (!id) return;
-    // client-side moderation: the model's "thinking" is rendered on the page
-    const safeStep: AgentStep = step.thinking ? { ...step, thinking: sanitizeText(step.thinking) } : step;
-    setMessages((ms) =>
-      ms.map((m) =>
-        m.id === id ? { ...m, steps: [...(m.steps ?? []), safeStep] } : m
-      )
-    );
-  }, []);
-
   const send = async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || loading) return;
     const history = messages.map((m) => ({ role: m.role, content: m.text }));
-    // cross-turn tool memory: one compact fact line per executed step
-    const facts = messages
-      .flatMap((m) => (m.steps ?? []).map((s) => s.fact))
-      .filter((f): f is string => typeof f === "string" && f.trim().length > 0)
-      .slice(-10);
-
-    const liveId = `a-${Date.now()}`;
-    liveIdRef.current = liveId;
-    setMessages((m) => [
-      ...m,
-      // display copy is moderated (the raw message still goes to the server
-      // so intent detection & regex pre-extraction keep working)
-      { id: `u-${Date.now()}`, role: "user", text: sanitizeText(trimmed) },
-      { id: liveId, role: "assistant", text: "", steps: [], streaming: true },
-    ]);
+    setMessages((m) => [...m, { id: `u-${Date.now()}`, role: "user", text: trimmed }]);
     setInput("");
     setLoading(true);
-
-    const finalize = (payload: any) => {
-      if (payload?.session) setSession(payload.session);
-      const rawText = payload?.reply || (payload?.error ? `خطا: ${payload.error}` : "پاسخی دریافت نشد.");
-      patchLive({
-        text: sanitizeText(rawText),
-        tool: payload?.tool ?? null,
-        toolArgs: payload?.tool_args ?? null,
-        toolResult: payload?.tool_result ?? null,
-        toolError: payload?.tool_error ?? null,
-        generative: payload?.generative ?? null,
-        fallback: payload?.fallback ?? false,
-        suggestions: payload?.suggestions ?? [],
-        steps: payload?.steps ?? undefined,
-        streaming: false,
-      });
-    };
-
     try {
       const r = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed, history, facts, session }),
+        body: JSON.stringify({ message: trimmed, history, session }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-
-      const ct = r.headers.get("content-type") ?? "";
-      if (ct.includes("application/json")) {
-        // non-streaming fallback (?stream=0 or validation error)
-        const j = await r.json();
-        finalize(j);
-      } else {
-        // NDJSON event stream
-        const reader = r.body?.getReader();
-        if (!reader) throw new Error("no response body");
-        const decoder = new TextDecoder();
-        let buf = "";
-        let gotTerminal = false; // done or error event received
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            let ev: any;
-            try { ev = JSON.parse(line); } catch { continue; }
-            if (ev.type === "step" && ev.step) appendStep(ev.step);
-            else if (ev.type === "done" && ev.payload) { gotTerminal = true; finalize(ev.payload); }
-            else if (ev.type === "error") {
-              gotTerminal = true;
-              patchLive({ text: sanitizeText(`خطا در دستیار: ${ev.error ?? "نامشخص"}`), streaming: false });
-            }
-          }
-        }
-        // stream ended without a terminal event → close gracefully
-        if (!gotTerminal) {
-          patchLive((prev) => (prev.text ? { streaming: false } : { text: "ارتباط قطع شد — لطفاً دوباره بپرس.", streaming: false }));
-        }
-      }
+      const j = await r.json() as any;
+      if (j.session) setSession(j.session);
+      setMessages((m) => [
+        ...m,
+        {
+          id: `a-${Date.now()}`,
+          role: "assistant",
+          text: j.reply || (j.error ? `خطا: ${j.error}` : "پاسخی دریافت نشد."),
+          tool: j.tool ?? null,
+          toolArgs: j.tool_args ?? null,
+          toolResult: j.tool_result ?? null,
+          toolError: j.tool_error ?? null,
+          generative: j.generative ?? null,
+          fallback: j.fallback ?? false,
+        },
+      ]);
     } catch (e) {
-      patchLive({ text: `خطا در ارتباط با دستیار: ${e instanceof Error ? e.message : String(e)}`, streaming: false });
+      setMessages((m) => [
+        ...m,
+        { id: `a-${Date.now()}`, role: "assistant", text: `خطا در ارتباط با دستیار: ${e instanceof Error ? e.message : String(e)}` },
+      ]);
     } finally {
-      liveIdRef.current = null;
       setLoading(false);
     }
   };
@@ -536,11 +359,10 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
       <header className="flex flex-col gap-1">
         <h2 className="flex items-center gap-2 text-xl font-bold">
           <Bot className="size-5" aria-hidden />دستیار خرید
-          <Badge variant="secondary" className="gap-1"><Sparkles className="size-3" aria-hidden />چندمرحله‌ای</Badge>
         </h2>
         <p className="text-xs text-muted-foreground">
-          بگو چی می‌خوای — دستیار قدم‌به‌قدم فکر می‌کند (جست‌وجو → مقایسه → پاسخ)، سؤال‌های لازم را می‌پرسد،
-          و برای تأیید قیمت/موجودی بهت کمک می‌کند با فروشگاه تماس بگیری.
+          بگو چی می‌خوای — دستیار سؤال‌های لازم را می‌پرسد، محصول‌ها را پیدا می‌کند، برای مقایسه انتخابشان کن،
+          و برای تأیید قیمت/موجی بهت کمک می‌کند با فروشگاه تماس بگیری.
         </p>
       </header>
 
@@ -557,40 +379,18 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
             <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
               <Sparkles className="size-10 opacity-40" aria-hidden />
               <p className="text-sm">مثلاً بگو: «یه کفش کتونی برای دانشگاه می‌خوام زیر ۴ میلیون»</p>
-              <p className="max-w-md text-xs leading-relaxed opacity-70">
-                دستیار اول سؤال‌های مهم را می‌پرسد، بعد دیتابیس واقعی ۲۲۵ هزار محصولی را جست‌وجو می‌کند،
-                پیشنهاد فروشگاه‌ها را مقایسه می‌کند و در نهایت جواب می‌دهد.
-              </p>
             </div>
           )}
           {messages.map((m) => {
-            const isDataTool = m.tool === "search_products" || m.tool === "find_alternatives";
-            const products = isDataTool ? extractProductItems(m.toolResult) : [];
+            const products = m.tool === "search_products" || m.tool === "find_alternatives" ? extractProductItems(m.toolResult) : [];
             const offers = m.tool === "compare_offers" ? extractOffers(m.toolResult) : [];
-            const shops = m.tool === "find_shops" ? extractShops(m.toolResult) : [];
-            const showThinking = m.streaming && !m.text;
             return (
               <motion.div key={m.id} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }} className={`flex flex-col gap-1 ${m.role === "user" ? "items-end" : "items-start"}`}>
                 <div className={`flex max-w-[88%] items-start gap-2 rounded-2xl px-3 py-2 text-sm leading-relaxed ${m.role === "user" ? "bg-primary text-primary-foreground" : "bg-muted text-foreground"}`}>
                   {m.role === "assistant" && <Bot className="mt-0.5 size-4 shrink-0 opacity-70" aria-hidden />}
                   {m.role === "user" && <User className="mt-0.5 size-4 shrink-0 opacity-70" aria-hidden />}
-                  {showThinking ? (
-                    <span className="flex items-center gap-2 py-0.5"><Loader2 className="size-4 animate-spin" aria-hidden /><span className="text-xs">در حال فکر کردن…</span></span>
-                  ) : (
-                    <p className="whitespace-pre-wrap">{m.text}</p>
-                  )}
-                  {m.role === "assistant" && !m.streaming && m.text && <CopyReplyButton text={m.text} />}
-                  {m.fallback && !m.streaming && m.role === "assistant" && m.text && (
-                    <Badge variant="outline" className="ml-1 shrink-0 self-center text-[9px]">حالت ساده</Badge>
-                  )}
+                  <p className="whitespace-pre-wrap">{m.text}</p>
                 </div>
-
-                {/* live step trace (multi-step reasoning) */}
-                {m.role === "assistant" && (m.steps?.length ?? 0) > 0 && (
-                  <div className="w-full max-w-[94%]">
-                    <StepTrace steps={m.steps ?? []} streaming={m.streaming} expanded={m.streaming} />
-                  </div>
-                )}
 
                 {products.length > 0 && (
                   <div className="grid w-full max-w-[94%] gap-2 sm:grid-cols-2">
@@ -612,35 +412,10 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
                   </div>
                 )}
 
-                {shops.length > 0 && (
-                  <div className="flex w-full max-w-[94%] flex-col gap-2">
-                    {shops.slice(0, 3).map((s) => (
-                      <ShopCard key={s.shop_id} shop={s} />
-                    ))}
-                    {shops.length > 3 && <p className="text-xs text-muted-foreground">و {toPersianDigits(shops.length - 3)} فروشگاه دیگر…</p>}
-                  </div>
-                )}
-
-                {/* Suggestion chips — the agent's proactive next steps */}
-                {m.role === "assistant" && !m.streaming && (m.suggestions?.length ?? 0) > 0 && m.text && (
-                  <div className="flex w-full max-w-[94%] flex-wrap items-center gap-1.5 pt-1">
-                    <span className="text-[10px] text-muted-foreground">قدم بعدی:</span>
-                    {(m.suggestions ?? []).map((s) => (
-                      <button
-                        key={s.label}
-                        type="button"
-                        onClick={() => send(s.message)}
-                        className="flex min-h-8 items-center gap-1 rounded-full border border-primary/40 bg-primary/5 px-2.5 text-[11px] text-primary transition-colors hover:bg-primary/10"
-                      >
-                        <Sparkles className="size-3" aria-hidden />
-                        {s.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                {m.role === "assistant" && <ToolCard msg={m} />}
 
                 {/* Generative UI: structured question/budget/preference cards */}
-                {m.role === "assistant" && !m.streaming && m.generative && (
+                {m.role === "assistant" && m.generative && (
                   <div className="w-full max-w-[94%]">
                     <GenerativeMessage
                       payload={m.generative}
@@ -661,7 +436,7 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
               </motion.div>
             );
           })}
-          {loading && messages[messages.length - 1]?.streaming !== true && (
+          {loading && (
             <div className="flex items-start gap-2 text-sm text-muted-foreground">
               <Bot className="mt-0.5 size-4 shrink-0 opacity-70" aria-hidden />
               <div className="flex items-center gap-2 rounded-2xl bg-muted px-3 py-2"><Loader2 className="size-4 animate-spin" aria-hidden /><span>در حال فکر کردن…</span></div>
@@ -686,7 +461,7 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
         </form>
       </Card>
 
-      <p className="text-center text-xs text-muted-foreground">{toPersianDigits(messages.filter(m => m.role === "user").length)} پیام</p>
+      <p className="text-center text-xs text-muted-foreground">{toPersianDigits(messages.length)} پیام</p>
 
       {/* Side-by-side compare drawer */}
       {compareOpen && (

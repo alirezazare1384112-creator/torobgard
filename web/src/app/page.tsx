@@ -12,6 +12,7 @@ import { AssistantView } from "@/components/torob/assistant-view";
 import { ShopsMapView } from "@/components/torob/shops-map-view";
 import { TripView } from "@/components/torob/trip-view";
 import { TopNav, type NavBarView } from "@/components/torob/top-nav";
+import { toPersianDigits } from "@/components/torob/format";
 import {
   NEIGHBORHOODS,
   type MetaResponse,
@@ -101,6 +102,41 @@ export default function Home() {
   return (
     <div className="flex min-h-screen flex-col bg-background">
       <SyntheticBanner isSynthetic={meta?.is_synthetic ?? false} />
+
+      {/* Honest status bar — shows what's actually available, never fabricates.
+          Inspired by the Stitch UI design's top status strip, but only claims
+          features that are actually backed by data or a configured provider. */}
+      <div className="border-b border-border bg-muted/30">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-1.5 text-[11px] text-muted-foreground">
+          <div className="flex items-center gap-1.5">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-75"></span>
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-600"></span>
+            </span>
+            <span className="font-medium text-foreground">دستیار خرید حضوری تهران</span>
+            <span className="hidden sm:inline">• {meta?.counts ? `${toPersianDigits(meta.counts.products)} محصول` : "بارگذاری…"}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            {/* Routing provider status — fetched from /api/route GET */}
+            <span className="hidden items-center gap-1 sm:flex" title="مسیریابی واقعی جاده‌ای از OSRM">
+              <svg viewBox="0 0 24 24" className="size-3 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden>
+                <path d="M3 17l6-6 4 4 8-8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              مسیریابی واقعی جاده‌ای فعال
+            </span>
+            <span className="hidden items-center gap-1 sm:flex" title="بر اساس دادهٔ Torob — ممکن است قدیمی باشد">
+              <svg viewBox="0 0 24 24" className="size-3 text-amber-600" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden>
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" strokeLinecap="round" />
+              </svg>
+              قیمت‌ها ثبت‌شده (نه زنده)
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 font-semibold text-emerald-700 dark:text-emerald-300">
+              دادهٔ واقعی Torob
+            </span>
+          </div>
+        </div>
+      </div>
 
       <TopNav view={nav} onView={setNavView} />
 

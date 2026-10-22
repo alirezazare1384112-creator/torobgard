@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useCompare } from "./compare-store";
+import { MarketComparisonBadge } from "./disclaimers";
 import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
 import type { SearchItem } from "./types";
 
@@ -96,7 +97,17 @@ export function CompareBar({ onPickProduct }: { onPickProduct?: (id: string) => 
                   <tbody>
                     <CompareRow label="برند" items={items} getValue={(p) => p.brand ?? MISSING} getBadge={(p) => p.brand ? null : "bg-muted"} />
                     <CompareRow label="دسته‌بندی" items={items} getValue={(p) => p.category ?? MISSING} />
-                    <CompareRow label="قیمت ثبت‌شده" items={items} getValue={(p) => p.min_price_toman !== null ? formatToman(p.min_price_toman) : "قیمت نامشخص"} highlight={(p, items) => isCheapest(p, items)} />
+                    <CompareRow
+                      label="قیمت ثبت‌شده"
+                      items={items}
+                      getValue={(p) => p.min_price_toman !== null ? formatToman(p.min_price_toman) : "قیمت نامشخص"}
+                      highlight={(p, items) => isCheapest(p, items)}
+                      extra={(p) => {
+                        if (p.min_price_toman === null) return null;
+                        const refs = items.filter((x) => x.min_price_toman !== null && x.product_id !== p.product_id).map((x) => x.min_price_toman!);
+                        return <MarketComparisonBadge price={p.min_price_toman} referencePrices={refs} />;
+                      }}
+                    />
                     <CompareRow label="تعداد پیشنهاد" items={items} getValue={(p) => toPersianDigits(p.offer_count) + " پیشنهاد"} highlight={(p, items) => hasMostOffers(p, items)} />
                     <CompareRow label="نزدیک‌ترین فروشگاه" items={items} getValue={(p) => p.nearest_shop_name ?? MISSING} />
                     <CompareRow label="فاصله (هوایی)" items={items} getValue={(p) => p.distance_km != null ? formatDistanceKm(p.distance_km) : MISSING} highlight={(p, items) => isNearest(p, items)} />
@@ -189,12 +200,14 @@ function CompareRow({
   getValue,
   highlight,
   getBadge,
+  extra,
 }: {
   label: string;
   items: SearchItem[];
   getValue: (p: SearchItem) => string;
   highlight?: (p: SearchItem, items: SearchItem[]) => boolean;
   getBadge?: (p: SearchItem) => string | null;
+  extra?: (p: SearchItem) => React.ReactNode | null;
 }) {
   return (
     <tr className="border-b border-border">
@@ -203,8 +216,13 @@ function CompareRow({
         const isBest = highlight ? highlight(p, items) : false;
         return (
           <td key={p.product_id} className="p-2 text-right">
-            <span className={isBest ? "font-semibold text-primary" : ""}>{getValue(p)}</span>
-            {isBest && <Badge variant="default" className="mr-1 text-[10px]">بهترین</Badge>}
+            <div className="flex flex-col items-end gap-1">
+              <div className="flex items-center gap-1">
+                <span className={isBest ? "font-semibold text-primary" : ""}>{getValue(p)}</span>
+                {isBest && <Badge variant="default" className="text-[10px]">بهترین</Badge>}
+              </div>
+              {extra && extra(p)}
+            </div>
           </td>
         );
       })}
