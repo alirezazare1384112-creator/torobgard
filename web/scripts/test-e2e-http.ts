@@ -23,14 +23,27 @@ async function get(path: string): Promise<{ status: number; body: any; ct: strin
   else { try { body = await r.text(); } catch {} }
   return { status: r.status, body, ct };
 }
+/** POST helper — handles both JSON and NDJSON (streaming) responses.
+ *  For NDJSON, parses the LAST line (type:done) which carries reply/session. */
 async function post(path: string, body: any): Promise<{ status: number; body: any }> {
   const r = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  const ct = r.headers.get("content-type") || "";
+  const text = await r.text();
   let jb: any = null;
-  try { jb = await r.json(); } catch { try { jb = await r.text(); } catch {} }
+  try {
+    if (ct.includes("application/x-ndjson") || (text.trim().startsWith("{") && text.includes("\n{"))) {
+      // NDJSON — take the last JSON line (the "done" payload)
+      const lines = text.trim().split("\n").filter((l: string) => l.trim());
+      const last = lines[lines.length - 1];
+      jb = JSON.parse(last);
+    } else {
+      jb = JSON.parse(text);
+    }
+  } catch { jb = text; }
   return { status: r.status, body: jb };
 }
 
