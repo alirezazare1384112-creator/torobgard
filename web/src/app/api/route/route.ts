@@ -64,7 +64,7 @@ export async function POST(req: Request) {
   }));
   try {
     const plan: RoutePlan = await computeRoute(
-      cleanStops.map((s) => ({ lat: s.lat, lon: s.lon, label: s.label }))
+      cleanStops.map((s) => ({ lat: s.lat, lon: s.lon, label: s.label as string }))
     );
     return NextResponse.json(plan);
   } catch (e) {

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import ZAI from "z-ai-web-dev-sdk";
 import { getTools, resolveLocation, type Filters } from "@/lib/torob";
 import { AGENT_SYSTEM_PROMPT, AGENT_SUMMARY_PROMPT } from "@/lib/torob/agent-tools";
@@ -111,15 +112,13 @@ function runTool(call: ToolCall): unknown {
         size: call.args.size ? String(call.args.size) : null,
         ask_installment: !!call.args.ask_installment,
       });
+    // SECURITY: record_seller_confirmation is deliberately NOT callable by the
+    // model. The LLM cannot manufacture a seller confirmation. Only the
+    // human-controlled /api/confirm endpoint (which validates IDs against the
+    // DB and requires an explicit user POST) can record a confirmation.
+    // If the model attempts to call it, we refuse with an explicit error.
     case "record_seller_confirmation":
-      return tools.recordSellerConfirmation({
-        shop_id: String(call.args.shop_id ?? ""),
-        product_id: String(call.args.product_id ?? ""),
-        status: (call.args.status as any) ?? "unconfirmed",
-        confirmed_price_toman: typeof call.args.confirmed_price_toman === "number" ? call.args.confirmed_price_toman : null,
-        in_stock: typeof call.args.in_stock === "boolean" ? call.args.in_stock : null,
-        note: call.args.note ? String(call.args.note) : null,
-      });
+      return { error: "record_seller_confirmation is not available to the agent. Confirmations can only be recorded by the user via the dedicated UI." };
     case "ask_user":
       return { kind: "ask_user", question: String(call.args.question ?? ""), why: String(call.args.why ?? "") };
     default:
@@ -185,12 +184,22 @@ function deterministicFallback(
     };
     const result = tools.searchProducts(query, searchFilters);
 
+    // Only mark "budget" as answered if a budget was actually parsed from the
+    // message. Don't blindly add "budget" to answersGiven — that would cause
+    // the generative UI to skip the budget question when no budget was stated.
+    // Also don't use parsed.terms[0] as category — it could be a non-product
+    // word like "من". Keep the category from the main-path keyword extraction.
+    const budgetAnswered = parsed.maxBudget !== null || parsed.minBudget !== null;
     const updatedSession = updateSession(session, {
       productQuery: query,
-      category: parsed.terms[0] ?? query,
+      // Only override category if it's not already set by the main-path
+      // keyword extraction (which uses known product keywords, not raw terms).
+      ...(session.category ? {} : { category: null }),
       budgetMax: parsed.maxBudget ?? session.budgetMax,
       budgetMin: parsed.minBudget ?? session.budgetMin,
-      answersGiven: [...new Set([...session.answersGiven, "budget"])],
+      answersGiven: budgetAnswered
+        ? [...new Set([...session.answersGiven, "budget"])]
+        : session.answersGiven,
     });
 
     const count = result.total;
@@ -232,80 +241,130 @@ interface Msg {
   content: string;
 }
 
+// --- Zod schemas for the /api/agent request body (Phase E: input validation) ---
+
+const PRIORITY_VALUES = ["comfort", "appearance", "durability", "price", "balanced", "precision", "wireless", "mechanical", "quiet", "performance", "portability", "battery", "sound", "noise_cancel"] as const;
+
+const sessionSchema = z.object({
+  category: z.string().nullable().optional(),
+  productQuery: z.string().max(200).nullable().optional(),
+  intendedUse: z.string().max(50).nullable().optional(),
+  budgetMin: z.number().min(0).max(10_000_000_000).nullable().optional(),
+  budgetMax: z.number().min(0).max(10_000_000_000).nullable().optional(),
+  priority: z.enum(PRIORITY_VALUES).nullable().optional(),
+  style: z.string().max(50).nullable().optional(),
+  brandPreference: z.string().max(100).nullable().optional(),
+  installmentOnly: z.boolean().optional(),
+  neighborhood: z.string().max(100).nullable().optional(),
+  lat: z.number().min(-90).max(90).nullable().optional(),
+  lon: z.number().min(-180).max(180).nullable().optional(),
+  selectedProductIds: z.array(z.string().max(100)).max(50).optional(),
+  excludedProductIds: z.array(z.string().max(100)).max(50).optional(),
+  answersGiven: z.array(z.string().max(30)).max(20).optional(),
+  // Server-managed fields — accepted from client (for round-trip) but
+  // overwritten server-side in updateSession. Validated as strings for safety.
+  createdAt: z.string().max(50).optional(),
+  updatedAt: z.string().max(50).optional(),
+}).strict();
+
+const historyMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1).max(5000),
+}).strict();
+
+const agentRequestSchema = z.object({
+  message: z.string().min(1).max(2000),
+  history: z.array(historyMessageSchema).max(10).nullish(),
+  session: sessionSchema.nullish(),
+}).strict();
+
 export async function POST(req: Request) {
+  // Cap request body size at 64KB to prevent oversized payloads.
+  const contentLength = req.headers.get("content-length");
+  if (contentLength && parseInt(contentLength, 10) > 65536) {
+    return NextResponse.json(
+      { error: "request body too large (max 64KB)", code: "validation_error" },
+      { status: 413 }
+    );
+  }
   let body: any;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "invalid JSON body", code: "validation_error" } satisfies AgentResponseBody,
+      { error: "invalid JSON body", code: "validation_error" },
       { status: 400 }
     );
   }
-  const question = typeof body?.message === "string" ? body.message.trim() : "";
+
+  // Validate the full request body with Zod.
+  const parsed = agentRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0];
+    const msg = firstIssue
+      ? `${firstIssue.path.join(".") || "body"}: ${firstIssue.message}`
+      : "validation error";
+    return NextResponse.json(
+      { error: msg, code: "validation_error" },
+      { status: 400 }
+    );
+  }
+  const { message: rawMessage, history: rawHistory, session: rawSession } = parsed.data;
+
+  const question = rawMessage.trim();
   if (!question) {
     return NextResponse.json(
-      { error: "message is required", code: "validation_error" } satisfies AgentResponseBody,
+      { error: "message is required", code: "validation_error" },
       { status: 400 }
     );
   }
-  if (question.length > 2000) {
-    return NextResponse.json(
-      { error: "message too long (max 2000 chars)", code: "validation_error" } satisfies AgentResponseBody,
-      { status: 400 }
-    );
-  }
-  const history: Msg[] = Array.isArray(body?.history)
-    ? body.history.filter(
-        (m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string"
-      ).slice(-10)  // keep at most last 10 turns to bound prompt size
-    : [];
 
-  // Session state (persisted client-side, sent back each turn)
-  // Validate the shape defensively — a malicious client could send any JSON.
+  const history: Msg[] = (rawHistory ?? []).map((m) => ({ role: m.role, content: m.content }));
+
+  // Session state (persisted client-side, sent back each turn).
+  // Zod already validated the shape; copy validated fields into a fresh session.
   let session: ShoppingSession = createSession();
-  if (body?.session && typeof body.session === "object") {
-    const s = body.session as Record<string, unknown>;
-    // Only copy known fields with the right types; ignore everything else.
-    if (typeof s.category === "string" || s.category === null) session.category = s.category as string | null;
-    if (typeof s.productQuery === "string" || s.productQuery === null) session.productQuery = s.productQuery as string | null;
-    if (typeof s.budgetMin === "number" || s.budgetMin === null) session.budgetMin = s.budgetMin as number | null;
-    if (typeof s.budgetMax === "number" || s.budgetMax === null) session.budgetMax = s.budgetMax as number | null;
-    if (typeof s.priority === "string" || s.priority === null) session.priority = s.priority as any;
-    if (typeof s.intendedUse === "string" || s.intendedUse === null) session.intendedUse = s.intendedUse as any;
-    if (typeof s.installmentOnly === "boolean") session.installmentOnly = s.installmentOnly;
-    if (typeof s.neighborhood === "string" || s.neighborhood === null) session.neighborhood = s.neighborhood as string | null;
-    if (Array.isArray(s.answersGiven)) session.answersGiven = s.answersGiven.filter((x: unknown) => typeof x === "string") as any;
+  if (rawSession) {
+    const s = rawSession;
+    session.category = s.category ?? null;
+    session.productQuery = s.productQuery ?? null;
+    session.intendedUse = s.intendedUse ?? null;
+    session.budgetMin = s.budgetMin ?? null;
+    session.budgetMax = s.budgetMax ?? null;
+    session.priority = (s.priority as ShoppingSession["priority"]) ?? null;
+    session.style = s.style ?? null;
+    session.brandPreference = s.brandPreference ?? null;
+    session.installmentOnly = s.installmentOnly ?? false;
+    session.neighborhood = s.neighborhood ?? null;
+    session.lat = s.lat ?? null;
+    session.lon = s.lon ?? null;
+    session.selectedProductIds = s.selectedProductIds ?? [];
+    session.excludedProductIds = s.excludedProductIds ?? [];
+    session.answersGiven = s.answersGiven ?? [];
   }
 
   // Update session from the user's message (simple keyword extraction)
   // Budget: look for numbers + میلیون/هزار/میلیارد (also normalize Persian digits first)
-  const normalizedQ = question
-    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
-    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
-  const budgetMatch = normalizedQ.match(
-    /(?:زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از|بین)?\s*(\d+(?:[,.]\d+)?)\s*(?:تا|-\s*)?\s*(?:(\d+(?:[,.]\d+)?)\s*)?(میلیارد|میلیون|هزار)?/
-  );
-  if (budgetMatch) {
-    const n = parseFloat(budgetMatch[1].replace(/,/g, ""));
-    const mult =
-      budgetMatch[3] === "میلیارد"
-        ? 1_000_000_000
-        : budgetMatch[3] === "میلیون"
-          ? 1_000_000
-          : budgetMatch[3] === "هزار"
-            ? 1_000
-            : 1;
-    const amount = Math.round(n * mult);
-    // If "بین X تا Y" → set min=X, max=Y
-    if (budgetMatch[2]) {
-      const n2 = parseFloat(budgetMatch[2].replace(/,/g, ""));
-      const amount2 = Math.round(n2 * mult);
-      session = updateSession(session, { budgetMin: Math.min(amount, amount2), budgetMax: Math.max(amount, amount2), answersGiven: [...new Set([...session.answersGiven, "budget"])] });
-    } else {
-      session = updateSession(session, { budgetMax: amount, answersGiven: [...new Set([...session.answersGiven, "budget"])] });
-    }
+  // Budget extraction — use the SHARED, TESTED parseQuery from normalize.ts.
+  // This is the same parser the fallback path and searchProducts use, so the
+  // LLM path and fallback path apply identical budget logic.
+  // CRITICAL: parseQuery only extracts a budget when there is a CLEAR money
+  // signal (زیر|تا|حداکثر|بیشتر از|کمتر از|بین + a number + optional unit, OR
+  // English under/below/up to + number + optional unit). A bare number like
+  // "20" in "من 20 سالمه" or "مدل 17" has NO money signal → maxBudget stays null.
+  // This prevents age, model numbers, and other unrelated numbers from being
+  // mistaken for a budget (P0 fix).
+  const parsedQuery = parseQuery(question);
+  if (parsedQuery.maxBudget !== null || parsedQuery.minBudget !== null) {
+    const patch: Partial<ShoppingSession> = {
+      answersGiven: [...new Set([...session.answersGiven, "budget"])],
+    };
+    if (parsedQuery.maxBudget !== null) patch.budgetMax = parsedQuery.maxBudget;
+    if (parsedQuery.minBudget !== null) patch.budgetMin = parsedQuery.minBudget;
+    session = updateSession(session, patch);
   }
+  // If no budget was parsed, do NOT mark "budget" as answered — the generative
+  // UI will ask for it in a later turn.
 
   // Product query: extract known product keywords
   const productKeywords = [
@@ -338,6 +397,10 @@ export async function POST(req: Request) {
   }
 
   // Detect use-type answers (from generative UI selections)
+  // Normalize Persian/Arabic digits to Latin for matching English use-type values.
+  const normalizedQ = question
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
   const useValues = ["university", "walking", "running", "everyday", "mixed", "office", "gaming", "programming", "calls", "music", "work"];
   for (const u of useValues) {
     if (normalizedQ === u || normalizedQ.includes(u)) {

@@ -244,13 +244,13 @@ function VerifyPanel({ offer }: { offer: any }) {
         <span className="line-clamp-1 text-sm font-semibold">{shop?.name}</span>
         <SyntheticNameBadge />
         <Badge className={statusBadge.cls}>{statusBadge.label}</Badge>
-        {shop?.has_installment && <Badge className="gap-1 bg-amber-600 text-white"><Clock className="size-3" aria-hidden />قسطی</Badge>}
+        {shop?.has_installment && <Badge title="بر اساس دادهٔ ثبت‌شده — قبل از مراجعه تأیید کنید" className="gap-1 bg-amber-600 text-white"><Clock className="size-3" aria-hidden />اقساط (ثبت‌شده)</Badge>}
       </div>
       {shop?.address && <p className="mt-1 flex items-start gap-1.5 text-xs text-muted-foreground"><MapPin className="mt-0.5 size-3 shrink-0" aria-hidden /><span className="leading-relaxed">{shop.address}</span></p>}
       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
         {offer.price_status === "ok" && offer.price_toman !== null ? <span className="font-num font-semibold text-primary">{formatToman(offer.price_toman)}</span> : <span className="text-muted-foreground">قیمت نامشخص</span>}
         {shop?.distance_km !== null && shop?.distance_km !== undefined && <Badge variant="secondary" className="font-num">{formatDistanceKm(shop.distance_km)}</Badge>}
-        {shop?.today_hours && <Badge variant="outline" className="gap-1"><Clock className="size-3" aria-hidden />{shop.open_now === true ? `باز • تا ${toPersianDigits(shop.today_hours.close)}` : shop.open_now === false ? `بسته • از ${toPersianDigits(shop.today_hours.open)}` : "ساعت کاری نامشخص"}</Badge>}
+        {shop?.today_hours && <Badge variant="outline" className="gap-1"><Clock className="size-3" aria-hidden />{shop.open_now === true ? `باز (ثبت‌شده) • تا ${toPersianDigits(shop.today_hours.close)}` : shop.open_now === false ? `بسته (ثبت‌شده) • از ${toPersianDigits(shop.today_hours.open)}` : "ساعت کاری نامشخص"}</Badge>}
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
         {phone && <a href={`tel:${phone.replace(/\s/g, "")}`}><Button type="button" variant="default" size="sm" className="h-9 gap-1.5"><Phone className="size-3.5" aria-hidden />تماس: {toPersianDigits(phone)}</Button></a>}

@@ -203,3 +203,6 @@ ok("stats: has price_status", typeof stats.body?.price_status === "object");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
+
+// Make this file a module for top-level await.
+export {};

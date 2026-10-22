@@ -143,3 +143,6 @@ ok("all prices are in toman (positive integers or null)",
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
+
+// Make this file a module for top-level await.
+export {};

@@ -44,13 +44,33 @@ export default function Home() {
   const [categories, setCategories] = React.useState<StatsCategory[]>([]);
   const [loadingMeta, setLoadingMeta] = React.useState(true);
   const [loadingStats, setLoadingStats] = React.useState(true);
+  const [errorMeta, setErrorMeta] = React.useState<string | null>(null);
+  const [errorStats, setErrorStats] = React.useState<string | null>(null);
+
+  const fetchMeta = React.useCallback(() => {
+    setLoadingMeta(true);
+    setErrorMeta(null);
+    fetch("/api/meta")
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((j: MetaResponse) => setMeta(j))
+      .catch((e) => setErrorMeta(e instanceof Error ? e.message : "خطا در دریافت اطلاعات"))
+      .finally(() => setLoadingMeta(false));
+  }, []);
+
+  const fetchStats = React.useCallback(() => {
+    setLoadingStats(true);
+    setErrorStats(null);
+    fetch("/api/stats")
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((j: StatsResponse) => setCategories(j.categories ?? []))
+      .catch((e) => setErrorStats(e instanceof Error ? e.message : "خطا در دریافت آمار"))
+      .finally(() => setLoadingStats(false));
+  }, []);
 
   React.useEffect(() => {
-    let cancelled = false;
-    fetch("/api/meta").then((r) => r.json()).then((j: MetaResponse) => { if (!cancelled) setMeta(j); }).catch(() => {}).finally(() => !cancelled && setLoadingMeta(false));
-    fetch("/api/stats").then((r) => r.json()).then((j: StatsResponse) => { if (!cancelled) setCategories(j.categories ?? []); }).catch(() => {}).finally(() => !cancelled && setLoadingStats(false));
-    return () => { cancelled = true; };
-  }, []);
+    fetchMeta();
+    fetchStats();
+  }, [fetchMeta, fetchStats]);
 
   const goSearch = (q: string) => {
     setSearchFilters({ ...DEFAULT_SEARCH_FILTERS, q });
@@ -100,6 +120,10 @@ export default function Home() {
                 categories={categories}
                 loadingMeta={loadingMeta}
                 loadingStats={loadingStats}
+                errorMeta={errorMeta}
+                errorStats={errorStats}
+                onRetryMeta={fetchMeta}
+                onRetryStats={fetchStats}
                 onSearch={goSearch}
                 onOpenAssistant={() => setNavView("assistant")}
               />

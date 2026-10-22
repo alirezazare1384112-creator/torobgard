@@ -60,11 +60,13 @@ export function ShopCard({
     ? `https://www.google.com/maps/search/?api=1&query=${shop.lat},${shop.lon}`
     : null;
   const today = shop.today_hours;
+  // Phase G: label open/closed as "based on recorded hours", NOT live verification.
+  // The dataset has weekly_hours but does NOT confirm the shop is actually open right now.
   const openLabel = today
     ? shop.open_now === true
-      ? `باز • تا ${toPersianDigits(today.close || "")}`
+      ? `باز (ساعات ثبت‌شده) • تا ${toPersianDigits(today.close || "")}`
       : shop.open_now === false
-        ? today.status === "closed" ? "امروز تعطیل" : `بسته • از ${toPersianDigits(today.open || "")}`
+        ? today.status === "closed" ? "امروز تعطیل (ساعات ثبت‌شده)" : `بسته (ساعات ثبت‌شده) • از ${toPersianDigits(today.open || "")}`
         : "ساعت کاری نامشخص"
     : "ساعت کاری نامشخص";
 
@@ -148,7 +150,7 @@ export function ShopCard({
           </div>
           <div className="flex flex-wrap gap-1">
             {shop.supports_fast_delivery && <Badge className="gap-1 bg-emerald-600 text-white hover:bg-emerald-600"><Zap className="size-3" aria-hidden />ارسال سریع</Badge>}
-            {shop.has_installment && <Badge className="gap-1 bg-amber-600 text-white hover:bg-amber-600"><CreditCard className="size-3" aria-hidden />قسطی</Badge>}
+            {shop.has_installment && <Badge title="بر اساس دادهٔ ثبت‌شده — قبل از مراجعه تأیید کنید" className="gap-1 bg-amber-600 text-white hover:bg-amber-600"><CreditCard className="size-3" aria-hidden />اقساط (ثبت‌شده)</Badge>}
             <Badge variant={shop.open_now === true ? "default" : shop.open_now === false ? "destructive" : "secondary"} className="gap-1">
               <Clock className="size-3" aria-hidden />{openLabel}
             </Badge>

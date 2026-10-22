@@ -3,11 +3,13 @@
 import * as React from "react";
 import { motion } from "framer-motion";
 import {
+  AlertCircle,
   ArrowLeft,
   Bot,
   CheckCircle2,
   MapPin,
   Package,
+  RefreshCw,
   Search,
   ShieldCheck,
   Store,
@@ -28,13 +30,19 @@ const EXAMPLE_QUERIES = [
   "هدفون بی‌سیم",
 ];
 
-function StatCard({ label, value, icon, loading }: { label: string; value: number | null; icon: React.ReactNode; loading: boolean }) {
+function StatCard({ label, value, icon, loading, error, onRetry }: { label: string; value: number | null; icon: React.ReactNode; loading: boolean; error?: string | null; onRetry?: () => void }) {
   return (
     <Card className="flex items-center gap-4 p-4 sm:p-6">
       <div className="rounded-lg bg-primary/10 p-3 text-primary">{icon}</div>
-      <div className="flex flex-col">
+      <div className="flex flex-1 flex-col">
         <span className="text-xs text-muted-foreground">{label}</span>
-        {loading ? <Skeleton className="mt-1 h-7 w-24" /> : <span className="text-2xl font-bold font-num">{formatNumber(value)}</span>}
+        {loading ? <Skeleton className="mt-1 h-7 w-24" /> : error ? (
+          <div className="flex items-center gap-1.5 text-sm text-destructive">
+            <AlertCircle className="size-4" aria-hidden />
+            <span className="line-clamp-1">خطا</span>
+            {onRetry && <button type="button" onClick={onRetry} className="ml-1 inline-flex items-center gap-0.5 text-xs text-primary hover:underline" aria-label="تلاش مجدد"><RefreshCw className="size-3" aria-hidden />تلاش مجدد</button>}
+          </div>
+        ) : <span className="text-2xl font-bold font-num">{formatNumber(value)}</span>}
       </div>
     </Card>
   );
@@ -45,6 +53,10 @@ export function HomeView({
   categories,
   loadingMeta,
   loadingStats,
+  errorMeta,
+  errorStats,
+  onRetryMeta,
+  onRetryStats,
   onSearch,
   onOpenAssistant,
 }: {
@@ -52,6 +64,10 @@ export function HomeView({
   categories: StatsCategory[];
   loadingMeta: boolean;
   loadingStats: boolean;
+  errorMeta?: string | null;
+  errorStats?: string | null;
+  onRetryMeta?: () => void;
+  onRetryStats?: () => void;
   onSearch: (q: string) => void;
   onOpenAssistant?: () => void;
 }) {
@@ -123,9 +139,9 @@ export function HomeView({
 
       {/* Stat cards */}
       <section aria-label="آمار کلی" className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <StatCard label="تعداد محصولات" icon={<Package className="size-6" aria-hidden />} value={meta?.counts.products ?? null} loading={loadingMeta} />
-        <StatCard label="فروشگاه‌ها" icon={<Store className="size-6" aria-hidden />} value={meta?.counts.shops ?? null} loading={loadingMeta} />
-        <StatCard label="پیشنهادها" icon={<Tags className="size-6" aria-hidden />} value={meta?.counts.offers ?? null} loading={loadingMeta} />
+        <StatCard label="تعداد محصولات" icon={<Package className="size-6" aria-hidden />} value={meta?.counts.products ?? null} loading={loadingMeta} error={errorMeta} onRetry={onRetryMeta} />
+        <StatCard label="فروشگاه‌ها" icon={<Store className="size-6" aria-hidden />} value={meta?.counts.shops ?? null} loading={loadingMeta} error={errorMeta} onRetry={onRetryMeta} />
+        <StatCard label="پیشنهادها" icon={<Tags className="size-6" aria-hidden />} value={meta?.counts.offers ?? null} loading={loadingMeta} error={errorMeta} onRetry={onRetryMeta} />
       </section>
 
       {/* Category quick-links */}
@@ -137,6 +153,12 @@ export function HomeView({
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
             {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-16 w-full" />)}
           </div>
+        ) : errorStats ? (
+          <Card className="flex flex-col items-center gap-2 p-6 text-center text-sm">
+            <AlertCircle className="size-5 text-destructive" aria-hidden />
+            <p className="text-muted-foreground">خطا در بارگذاری دسته‌ها: {errorStats}</p>
+            {onRetryStats && <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={onRetryStats}><RefreshCw className="size-3.5" aria-hidden />تلاش مجدد</Button>}
+          </Card>
         ) : categories.length === 0 ? (
           <Card className="p-6 text-center text-sm text-muted-foreground">
             <MapPin className="mx-auto mb-2 size-5 opacity-50" aria-hidden />

@@ -5,11 +5,13 @@ import { motion } from "framer-motion";
 import {
   ArrowRight,
   Calendar,
+  Check,
   CheckCircle2,
   HelpCircle,
   Loader2,
   MapPin,
   Package,
+  Plus,
   Replace,
   Store,
   Truck,
@@ -20,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Slider } from "@/components/ui/slider";
+import { useCart } from "./cart-store";
 import { formatDistanceKm, formatNumber, formatPersianDate, formatToman, toPersianDigits } from "./format";
 import { SyntheticNameBadge } from "./disclaimers";
 import { DEFAULT_WEIGHTS, rankOffers, type RankWeights, type RankedOffer } from "./rank";
@@ -29,6 +32,7 @@ import type {
   CompareOffer,
   CompareResponse,
   ProductDetails,
+  SearchItem,
 } from "./types";
 
 function priceStatusBadge(status: CompareOffer["price_status"]) {
@@ -199,18 +203,18 @@ function OfferRow({
           </Badge>
         )}
         {offer.shop.has_installment && (
-          <Badge className="gap-1 bg-amber-600 text-white hover:bg-amber-600">
+          <Badge title="بر اساس دادهٔ ثبت‌شده — قبل از مراجعه تأیید کنید" className="gap-1 bg-amber-600 text-white hover:bg-amber-600">
             <Zap className="size-3" aria-hidden />
-            قسطی
+            اقساط (ثبت‌شده)
           </Badge>
         )}
         {offer.shop.today_hours && (
           <Badge variant="outline" className="gap-1">
             <Calendar className="size-3" aria-hidden />
             {offer.shop.open_now === true
-              ? `باز • تا ${toPersianDigits(offer.shop.today_hours.close)}`
+              ? `باز (ساعات ثبت‌شده) • تا ${toPersianDigits(offer.shop.today_hours.close)}`
               : offer.shop.open_now === false
-                ? `بسته • از ${toPersianDigits(offer.shop.today_hours.open)}`
+                ? `بسته (ساعات ثبت‌شده) • از ${toPersianDigits(offer.shop.today_hours.open)}`
                 : "ساعت کاری نامشخص"}
           </Badge>
         )}
@@ -300,6 +304,14 @@ export function ProductView({
   const [altsLoading, setAltsLoading] = React.useState(false);
   const [altsError, setAltsError] = React.useState<string | null>(null);
   const [showAlts, setShowAlts] = React.useState(false);
+
+  // Add-to-cart wiring (mirrors product-card.tsx). The product detail payload
+  // (ProductDetails) doesn't carry min_price_toman/image_url, so they're null
+  // here — the cart only needs product_id/title/brand/category/offer_count.
+  const add = useCart((s) => s.add);
+  const inCart = useCart((s) =>
+    s.items.some((x) => x.product_id === productId)
+  );
 
   React.useEffect(() => {
     let cancelled = false;
@@ -417,10 +429,43 @@ export function ProductView({
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:py-8">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <Button variant="ghost" onClick={onBack} className="w-fit">
-          <ArrowRight className="size-4" aria-hidden />
-          بازگشت به نتایج
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="ghost" onClick={onBack} className="w-fit">
+            <ArrowRight className="size-4" aria-hidden />
+            بازگشت به نتایج
+          </Button>
+          <Button
+            type="button"
+            variant={inCart ? "secondary" : "outline"}
+            size="sm"
+            className="gap-1.5"
+            disabled={inCart}
+            onClick={() =>
+              add({
+                product_id: product.product_id,
+                title: product.title,
+                brand: product.brand,
+                category: product.category,
+                min_price_toman: null,
+                offer_count: product.offer_count,
+                image_url: null,
+              } satisfies SearchItem)
+            }
+            aria-label={inCart ? "در سبد است" : "افزودن به سبد"}
+          >
+            {inCart ? (
+              <>
+                <Check className="size-4" aria-hidden />
+                در سبد است
+              </>
+            ) : (
+              <>
+                <Plus className="size-4" aria-hidden />
+                افزودن به سبد
+              </>
+            )}
+          </Button>
+        </div>
         <div className="flex flex-wrap gap-1.5">
           {product.category && <Badge variant="secondary">{product.category}</Badge>}
           {product.brand && <Badge variant="outline">{product.brand}</Badge>}

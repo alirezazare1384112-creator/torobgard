@@ -104,20 +104,14 @@ export const TOOL_CATALOG = [
       ask_installment: "boolean?",
     },
   },
-  {
-    name: "record_seller_confirmation",
-    description:
-      "نتیجهٔ تماس دستی کاربر با فروشنده را ثبت می‌کند (در حافظهٔ همین session؛ دائمی نیست). status: confirmed|pending|no_response|unconfirmed.",
-    args: {
-      shop_id: "string (لازم)",
-      product_id: "string (لازم)",
-      status: "string (confirmed|pending|no_response|unconfirmed)",
-      confirmed_price_toman: "number?",
-      in_stock: "boolean?",
-      note: "string?",
-    },
-  },
 ] as const;
+
+// SECURITY: record_seller_confirmation is deliberately NOT in the model's
+// tool catalog. The LLM must not be able to manufacture a seller confirmation
+// from its own generated arguments — only a human-controlled workflow
+// (/api/confirm POST, which validates shop_id/product_id against the DB and
+// requires an explicit user action) can record a confirmation. The model
+// can prepare an inquiry (prepare_seller_inquiry) but never record one.
 
 export const AGENT_SYSTEM_PROMPT = `You are "ترب‌گرد"، a Persian in-person shopping assistant for Tehran. You help a user who may not yet know exactly which product/model they want, then find and verify shops.
 
@@ -137,7 +131,7 @@ CORE RULES:
 4. Choose arguments carefully: put the product phrase into "query"; for neighborhood use "near".
 5. For a specific product already shown, use its product_id in get_product_details / compare_offers / find_alternatives.
 6. For a shopping list, use plan_shopping_trip with items.
-7. To verify a shop's hours, use check_shop_hours. To draft a message the user can send to the shop to confirm price/stock, use prepare_seller_inquiry (the user sends it themselves — we do NOT auto-send). To record the user's manual call result, use record_seller_confirmation.
+7. To verify a shop's hours, use check_shop_hours. To draft a message the user can send to the shop to confirm price/stock, use prepare_seller_inquiry (the user sends it themselves — we do NOT auto-send). You CANNOT record a seller confirmation yourself — only the user can record a manual call result via the dedicated UI; never claim a seller confirmed anything unless the user explicitly told you so AND you are responding to their manual entry.
 8. NEVER invent product_ids, prices, shop names, or stock. Only state facts that come from tool results.
 9. Be honest about dataset limits: shop names are synthetic, prices may be stale (timestamps go back to 2020), there is no stock field, and ~4.5% of offers have no price. Distinguish "قیمت ثبت‌شده" (recorded) from "قیمت تأییدشده" (confirmed by seller).
 10. Keep conversation context: do not re-ask something already answered.

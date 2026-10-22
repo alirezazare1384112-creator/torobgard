@@ -60,7 +60,6 @@ export function handleToolError(e: unknown) {
   // absolute filesystem path of the SQLite DB and DB schema details
   // (better-sqlite3 messages like "unable to open database file:
   // /home/z/my-project/data/torob.sqlite"). Log server-side only.
-  // eslint-disable-next-line no-console
   console.error("[api] server error:", msg);
   return errorJson("internal_error", 500, "server_error");
 }
