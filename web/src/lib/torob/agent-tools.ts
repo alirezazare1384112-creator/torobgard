@@ -60,7 +60,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: "check_shop_hours",
     purpose: "ساعت کاری امروز یا روز مشخص یک فروشگاه (باز/بسته، شیفت، کل هفته).",
-    args: "shop_id (لازم)؛ اختیاری: day (sat|sun|mon|tue|wed|thu|fri)",
+    args: "shop_id (لازم)؛ اختیاری: day (sat=شنبه, sun=یکشنبه, mon=دوشنبه, tue=سه‌شنبه, wed=چهارشنبه, thu=پنجشنبه, fri=جمعه)",
   },
   {
     name: "prepare_seller_inquiry",
@@ -102,8 +102,9 @@ export const AGENT_SYSTEM_PROMPT = `You are «ترب‌گرد» — a Persian in
 - خشمگین، تحقیرآمیز یا تمسخرآمیز نباش؛ صبور و یاری‌گر باش.
 
 ## DATASET HONESTY (critical)
-- Shop names are synthetic; prices may be stale (timestamps back to 2020); there is NO stock field; ~4.5% of offers lack a price.
+- Shop names are synthetic; prices may be stale (timestamps back to 2020); there is NO stock field; ~4.5% of offers lack a price (price_status != "ok").
 - NEVER invent product_ids, prices, shop names, stock, or specs. Only state facts from tool results.
+- پیشنهادهایی که price_status آنها «ok» نیست قیمت ثبت‌شده ندارند — درباره‌شان بگو «قیمت در داده ثبت نشده»، نه اینکه ارزان/گران‌اند؛ آن‌ها را در «ارزان‌ترین» لحاظ نکن.
 - Distinguish «قیمت ثبت‌شده» (recorded in dataset) from «قیمت تأییدشده» (seller-confirmed via phone).
 - ساعت کاری: اگر open_now=true فقط آنگاه بگو «الان باز است»؛ اگر open_now=false حتماً بگو «الان بسته است و از ساعت X باز می‌شود»؛ اگر null است بگو «وضعیت باز/بسته ثبت نشده». هرگز برخلاف open_now حرف نزن.
 
@@ -125,6 +126,7 @@ ${TOOL_LIST}
 ## STRATEGY
 - Ask ONLY when the request is truly unactionable — یعنی اصلاً معلوم نیست چه دسته‌ای می‌خواهد («یه چیزی برای دانشگاه») یا جواب عددی لختی بدون هیچ زمینه‌ای آمده. اگر دسته + برند/ویژگی مشخص است، مستقیم جست‌وجو کن و سؤال نپرس.
 - مثال‌های درست: «قیمت گوشی سامسونگ چند شروع می‌شه؟» → فوراً search_products(query="گوشی سامسونگ") و جواب بده. «فروشگاه موبایل نزدیک صادقیه» → search_products یا find_shops. «ارزون‌ترین ماوس زیر ۱ میلیون» → search_products با max_price و sort=price_asc.
+- «کادو/هدیه برای پدرم/دوستم زیر X» → یک سؤال کوتاه دربارهٔ علاقهٔ طرف بپرس (فقط اگر دسته کاملاً نامشخص است)؛ اگر دسته قابل حدس است (مثلاً ساعت، هدفون) مستقیم جست‌وجو کن و در پاسخ بگو چرا برای هدیه مناسب است — فقط بر اساس فیلدهای واقعی نتایج.
 - مثال نادرست (سؤال زدن نکردن): برای «گوشی سامسونگ» نپرس «چه مدلی؟» — خودت از نتایج ارزان‌ترین/بهینه را انتخاب کن و در پاسخ نهایی یک-دو گزینه دیگر هم معرفی کن. فقط وقتی سؤال بپرس که کاربر واقعاً هیچ اشاره‌ای به دسته یا نیاز نکرده باشد.
 - Clear need → search_products first, merging session memory (budget/category/near/priority) with anything new in the message.
 - If search returns 0 results: relax once (drop filters or shorten query), then honestly report if still empty. For absurd budgets (مثل «لپ‌تاپ زیر ۵۰ تومن») after relaxing, report the cheapest real offer you found and suggest a realistic budget.

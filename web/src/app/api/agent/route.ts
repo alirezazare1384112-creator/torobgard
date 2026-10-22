@@ -139,8 +139,11 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-/** LLM call with retry + exponential backoff for transient 429s. */
-async function callLLM(zai: Awaited<ReturnType<typeof ZAI.create>>, messages: Msg[], attempts = 4): Promise<string> {
+/** LLM call with retry + exponential backoff for transient 429s.
+ *  Kept short (3 attempts / ~6s total wait): during a sustained outage the
+ *  user must reach the deterministic fallback quickly instead of staring at
+ *  «در حال فکر کردن…» for 20+ seconds. */
+async function callLLM(zai: Awaited<ReturnType<typeof ZAI.create>>, messages: Msg[], attempts = 3): Promise<string> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -154,7 +157,7 @@ async function callLLM(zai: Awaited<ReturnType<typeof ZAI.create>>, messages: Ms
       const msg = e instanceof Error ? e.message : String(e);
       const transient = msg.includes("429") || msg.includes("Too many requests") || msg.includes("timeout") || msg.includes("ECONNRESET") || msg.includes("socket hang up");
       if (transient && i < attempts - 1) {
-        await new Promise((r) => setTimeout(r, 3500 * (i + 1)));
+        await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
         continue;
       }
       throw e;
@@ -327,6 +330,8 @@ function cleanReply(s: string): string {
     .replace(/__(.+?)__/g, "$1")
     .replace(/^#+\s*/gm, "")
     .replace(/`{1,3}/g, "")
+    // markdown bullets → RTL-friendly em-dash bullets
+    .replace(/(^|\n)[ \t]*[-*][ \t]+/g, "$1— ")
     .trim();
 }
 
@@ -401,7 +406,8 @@ function execTool(name: string, args: Record<string, any>): unknown {
       // explicit user POST) can record one.
       return { error: "record_seller_confirmation is not available to the agent. Confirmations can only be recorded by the user via the dedicated UI." };
     default:
-      throw new Error(`unknown tool: ${name}`);
+      // Persian error so the step trace never shows raw English to the user.
+      throw new Error(`ابزار ناشناخته: ${name}`);
   }
 }
 
@@ -680,6 +686,7 @@ const PRODUCT_KEYWORDS = [
   "دوربین", "تلویزیون", "یخچال", "ماشین لباسشویی", "جاروبرقی", "کفش", "کتونی",
   "پاور بانک", "پاوربانک", "شارژر", "کابل", "رم", "هارد", "مودم", "تبلت",
   "ساعت هوشمند", "اسپیکر", "پنکه", "مانیتور", "پرینتر", "کنسول", "پلی استیشن",
+  "کولر", "اتو", "ظرفشویی", "جارو شیشه", "چای ساز", "قهوه ساز",
 ];
 
 const USE_VALUES = ["university", "walking", "running", "everyday", "mixed", "office", "gaming", "programming", "calls", "music", "work"];
@@ -687,22 +694,36 @@ const USE_VALUES = ["university", "walking", "running", "everyday", "mixed", "of
 
 /** Does the message mention a product keyword? Short keywords (≤3 chars,
  *  like «رم») require whole-TOKEN equality — «بخرم» contains the substring «رم»
- *  but must NOT trigger a RAM search. Longer keywords use substring matching. */
-function mentionsProductKeyword(message: string): string | null {
+ *  but must NOT trigger a RAM search. Longer keywords use substring matching
+ *  on BOTH the raw text and a space-collapsed form, so «لپ تاپ» (regular
+ *  space), «لپ‌تاپ» (ZWNJ) and «لپتاپ» (compact) all match. */
+function mentionsProductKeywords(message: string): string[] {
   const norm = normalizeText(message);
   const tokens = norm.split(/\s+/).filter(Boolean);
+  const compact = norm.replace(/\s+/g, "");
+  const found: string[] = [];
   for (const k of PRODUCT_KEYWORDS) {
-    if (k.length <= 3) {
-      if (tokens.includes(k)) return k;
-    } else if (message.includes(k) || norm.includes(k)) {
-      return k;
+    const kNorm = normalizeText(k);
+    let hit = false;
+    if (kNorm.length <= 3) {
+      hit = tokens.includes(kNorm);
+    } else {
+      const kCompact = kNorm.replace(/\s+/g, "");
+      hit = message.includes(k) || norm.includes(kNorm) || (kCompact.length >= 4 && compact.includes(kCompact));
     }
+    if (hit && !found.includes(k)) found.push(k);
   }
-  return null;
+  return found;
 }
 
-/** Bare greetings / thanks / bye — no shopping intent at all. */
-const GREETING_RE = /^(سلام|سلام عليكم|درود|هي|hi|hello|salam|سلامم+|صبح بخیر|شب بخیر|خوبی|خوب هستی)[!؟?.،\s]*$/i;
+function mentionsProductKeyword(message: string): string | null {
+  return mentionsProductKeywords(message)[0] ?? null;
+}
+
+/** Bare greetings / thanks / bye — no shopping intent at all. Tested against
+ *  NORMALIZED text (Arabic ي/ك folded to Persian), so the Persian forms are
+ *  what actually match («سلام علیکم» typed with Persian ی/ک). */
+const GREETING_RE = /^(سلام|سلام علیکم|سلام عليكم|درود|هي|هی|hi|hello|salam|سلامم+|صبح بخیر|شب بخیر|خوبی|خوب هستی)[!؟?.،\s]*$/i;
 const THANKS_RE = /^(ممنون|مرسی|با تشکر|دمت گرم|توضیع خدمتتون|مرسی از راهنمایی)[!؟?.،\s]*$/i;
 const BYE_RE = /^(خداحافظ|خداحفظی|بای|بای بای|فعلاً?|خدانگهدار)[!؟?.،\s]*$/i;
 
@@ -893,14 +914,21 @@ const STOPWORDS = new Set([
   "رو", "را", "و", "با", "برای", "از", "که", "تا", "هم", "این", "آن", "یک", "یه",
   "پیدا", "کن", "کنم", "بگو", "بگوی", "نشان", "بده", "میخوام", "می‌خوام", "خواهم",
   "می", "داره", "دارن", "باشه", "بود", "است", "هست", "کجا", "بخرم", "خرید", "خریدن",
-  "زیر", "حدود", "تومان", "میلیون", "میلیارد", "هزار", "ارزون", "ارزان", "ترین",
-  "بهترین", "گران", "قیمت", "چند", "برام", "من", "شما", "لطفا", "ممنون",
+  "زیر", "حدود", "تومان", "تومن", "تومنی", "میلیون", "میلیارد", "هزار", "ارزون", "ارزان", "ترین",
+  "بهترین", "گران", "قیمت", "چند", "برام", "من", "شما", "لطفا", "ممنون", "چیزی", "چیز",
   // follow-up question words — pronoun references like «نزدیک‌ترین فروشگاهش کجاست؟»
   // must relax down to the session's remembered productQuery, not search garbage
   "نزدیک", "نزدیکترین", "فروشگاه", "فروشگاهش", "فروشگاهها", "کجاست", "کجاست؟", "چیست",
-  "چه", "کدام", "دومی", "اولی", "همون", "همونی", "الان", "دیگه", "باز", "کنید", "کنید",
+  "چه", "کدام", "دومی", "اولی", "همون", "همونی", "الان", "دیگه", "باز", "کنید",
   "میخواد", "می‌خواد", "میکنی", "می‌کنی", "میتونی", "می‌تونی", "باشه؟", "خب", "دمت",
+  // filter/intent words that must never become SQL terms (handled via session)
+  "قسطی", "اقساط", "دنبال", "لازم", "خواستم", "میخواستم", "می‌خواستم", "ببینم", "نشون",
 ]);
+
+/** Words that signal a shopping intent even without a known product keyword
+ *  («یه چیزی میخوام», «هلی کوپتر میخوام بخرم») — used to pick between a
+ *  clarifying question and an off-topic redirect in the fallback. */
+const SHOPPING_INTENT_RE = /میخوام|می‌خوام|میخواهم|می‌خواهم|بخرم|بخریم|خرید|پیدا|قیمت|نمایش|بده|نشون|فروشگاه|دنبال|لازم|خواستم|میخواستم|می‌خواستم|ببینم|دارید|دارین/;
 
 /** Progressive query relaxation for the deterministic fallback: try the
  *  cleaned full query first, then keyword+connectivity, then keyword only,
@@ -944,25 +972,89 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
   const parsed = parseQuery(message);
   const steps: AgentStep[] = [];
 
-  /* ---- Follow-up turns without the LLM: reuse product/shop ids from the
-   *      fact lines the client replays (cross-turn memory). «نزدیک‌ترین
-   *      فروشگاهش کجاست؟» → compare_offers on the last product; «ساعت کاری»
-   *      → check_shop_hours on the last shop. ---- */
+  /* ---- IDs mentioned DIRECTLY in the message (product cards send a
+   *      product_id when the user taps «مشاهده») take priority over ids
+   *      recovered from the replayed fact lines. ---- */
   const normMsg = normalizeText(message);
-  const hasProductKeyword = mentionsProductKeyword(message) !== null;
+  const kws = mentionsProductKeywords(message);
+  const hasProductKeyword = kws.length > 0;
+  const pidInMsg = message.match(/product_[A-Za-z0-9]+/)?.[0] ?? null;
+  const shopInMsg = message.match(/shop_[A-Za-z0-9]+/)?.[0] ?? null;
+  // distinct product ids across the replayed fact lines (cross-turn memory)
+  const factIds = [...new Set(facts.join(" ").match(/product_[A-Za-z0-9]+/g) ?? [])];
+  const tripIds = [...new Set([pidInMsg, ...factIds].filter((x): x is string => !!x))];
+
+  /* ---- Trip planning without the LLM: «برنامه سفر خرید» after a
+   *      multi-product turn replays the product ids surfaced in facts. ---- */
+  if (/برنامه سفر|سفر خرید|مسیر خرید|برنامه خرید/.test(normMsg) && tripIds.length >= 2) {
+    try {
+      const tools = getTools();
+      const items = tripIds.slice(0, 5).map((id) => ({ product_id: id }));
+      const trip = tools.planShoppingTrip(items, undefined, 3);
+      steps.push({
+        index: 0,
+        tool: "plan_shopping_trip",
+        label: TOOL_LABELS["plan_shopping_trip"] ?? "برنامه‌ریزی سفر خرید",
+        thinking: "چیدمان سفر خرید حضوری با حداقل ایستگاه (حالت بدون هوش مصنوعی)",
+        args: { items },
+        observation: compactResult("plan_shopping_trip", trip),
+        status: "ok",
+        fact: factLine("plan_shopping_trip", trip, { items }),
+      });
+      const plan = (trip as any)?.plan ?? [];
+      const total = plan.reduce((a: number, p: any) => a + (p.subtotal_toman ?? 0), 0);
+      const lines = plan
+        .map((p: any, i: number) => {
+          const names = (Array.isArray(p.items) ? p.items : [])
+            .map((it: any) => it?.title ?? it?.product_id)
+            .filter(Boolean);
+          return `${toPersianDigits(i + 1)}. ${p.shop?.name ?? "فروشگاه"}${p.shop?.location_label ? ` (${p.shop.location_label})` : ""}${names.length ? ` — ${names.join("، ")}` : ""}${typeof p.subtotal_toman === "number" ? ` ≈ ${p.subtotal_toman.toLocaleString("fa-IR")} تومان` : ""}`;
+        })
+        .join("\n");
+      const unmatched = ((trip as any)?.unmatched_product_ids ?? []).length;
+      const reply = plan.length
+        ? `برنامهٔ سفر خرید (${toPersianDigits(plan.length)} ایستگاه، جمع کل ≈ ${total.toLocaleString("fa-IR")} تومان):\n${lines}\nفاصله‌ها تقریبی (هوایی) است و قیمت‌ها از دیتاست — قبل از حرکت با فروشگاه تماس بگیرید.${unmatched ? `\nبرای ${toPersianDigits(unmatched)} کالا پیشنهاد ثبت‌شده‌ای نبود.` : ""}`
+        : "برای این کالاها پیشنهادی در دیتابیس نبود که سفر خرید بچینم — لطفاً کالاهای دیگری انتخاب کنید.";
+      return {
+        steps,
+        payload: {
+          reply,
+          steps,
+          tool: "plan_shopping_trip",
+          tool_args: { items },
+          tool_result: trip,
+          tool_error: null,
+          generative: null,
+          session,
+          suggestions: buildSuggestions(steps, session),
+          fallback: true,
+        },
+      };
+    } catch {
+      /* fall through to the search path */
+    }
+  }
+
+  /* ---- Follow-up turns without the LLM: reuse product/shop ids from the
+   *      message or the fact lines the client replays (cross-turn memory).
+   *      «نزدیک‌ترین فروشگاهش کجاست؟» → compare_offers on the last product;
+   *      «ساعت کاری» → check_shop_hours on the last shop. ---- */
   const isFollowUp =
-    !hasProductKeyword && facts.length > 0 &&
-    /نزدیک|فروشگاه|کجا|قیمت|چند|ساعت|باز|بسته|خریدم|همون|دومی|پیشنهاد|مقایسه|جایگزین|ارزان|ارزون/.test(normMsg);
+    pidInMsg !== null ||
+    (!hasProductKeyword && facts.length > 0 &&
+      /نزدیک|فروشگاه|کجا|قیمت|چند|ساعت|باز|بسته|خریدم|همون|دومی|پیشنهاد|مقایسه|جایگزین|ارزان|ارزون|برنامه|سفر|مسیر/.test(normMsg));
 
   if (isFollowUp) {
     try {
       const tools = getTools();
-      // last product surfaced (search/alternatives/compare facts), last shop
+      // last product surfaced (in-message id first, then search/alternatives/compare facts), last shop
       const lastProductId =
+        pidInMsg ??
         lastFactCapture(facts, /cheapest: "[^"]+" \((product_[A-Za-z0-9]+)/) ??
         lastFactCapture(facts, /compare_offers\((product_[A-Za-z0-9]+)/) ??
         lastFactCapture(facts, /find_alternatives\((product_[A-Za-z0-9]+)/);
       const lastShopId =
+        shopInMsg ??
         lastFactCapture(facts, /shop: [^(]+ \((shop_[A-Za-z0-9]+)/) ??
         lastFactCapture(facts, /check_shop_hours\((shop_[A-Za-z0-9]+)/);
 
@@ -1070,9 +1162,106 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
 
   const candidates = fallbackQueryCandidates(message, session);
 
+  /* ---- Multi-product requests («میخوام ماوس و کیبورد و هدفون بخرم»): search
+   *      each product keyword separately so EVERY requested item gets a real
+   *      candidate, then merge the top results into one card list. ---- */
+  if (kws.length >= 2) {
+    try {
+      const tools = getTools();
+      const filters = sessionToFilters(session);
+      const wantsCheapest = /ارزان|ارزون/i.test(normMsg);
+      const pickedKws = kws.slice(0, 3);
+      const lines: string[] = [];
+      const mergedItems: any[] = [];
+      let totalSum = 0;
+      let foundCount = 0;
+      for (const kw of pickedKws) {
+        const f: Filters = {
+          max_price: filters.max_price,
+          min_price: filters.min_price,
+          near: filters.near ? resolveLocation(filters.near) : null,
+          installment_only: filters.installment_only,
+          sort: wantsCheapest ? "price_asc" : "relevance",
+          limit: 6,
+        };
+        let r = tools.searchProducts(kw, f);
+        let relaxed = false;
+        if (r.total === 0 && (f.max_price !== null || f.min_price !== null || f.installment_only || f.near !== null)) {
+          r = tools.searchProducts(kw, { sort: f.sort, limit: 6 });
+          relaxed = true;
+        }
+        steps.push({
+          index: steps.length,
+          tool: "search_products",
+          label: TOOL_LABELS["search_products"],
+          thinking: relaxed
+            ? `«${kw}» با فیلترهای شما نتیجه نداشت؛ بدون فیلتر جست‌وجو کردم (حالت بدون هوش مصنوعی)`
+            : `جست‌وجوی «${kw}» در دیتابیس (حالت بدون هوش مصنوعی)`,
+          args: { query: kw },
+          observation: compactResult("search_products", r),
+          status: "ok",
+          fact: factLine("search_products", r, { query: kw }),
+        });
+        totalSum += r.total;
+        mergedItems.push(...r.items.slice(0, 2));
+        const top = r.items.find((i: any) => typeof i.min_price_toman === "number") ?? r.items[0];
+        if (top) {
+          foundCount++;
+          lines.push(
+            `— ${kw}: «${top.title}»${typeof top.min_price_toman === "number" ? ` از ${top.min_price_toman.toLocaleString("fa-IR")} تومان` : ""} (${toPersianDigits(top.offer_count)} پیشنهاد)`
+          );
+        } else {
+          lines.push(`— ${kw}: چیزی پیدا نشد`);
+        }
+      }
+      const updatedSession = updateSession(session, {
+        productQuery: kws[0],
+        category: kws[0],
+      });
+      if (foundCount === 0) {
+        return {
+          steps,
+          payload: {
+            reply: `برای هیچ‌کدام از این کالاها چیزی در دیتابیس پیدا نکردم — عبارت‌ها را کلی‌تر بنویسید یا دستهٔ دیگری بگویید.`,
+            steps,
+            tool: "search_products",
+            tool_args: { query: pickedKws.join("، ") },
+            tool_result: null,
+            tool_error: null,
+            generative: null,
+            session: updatedSession,
+            suggestions: [],
+            fallback: true,
+          },
+        };
+      }
+      const head =
+        foundCount === pickedKws.length
+          ? `برای هر ${toPersianDigits(pickedKws.length)} کالا یک گزینهٔ برتر پیدا کردم:`
+          : `برای ${toPersianDigits(foundCount)} کالا از ${toPersianDigits(pickedKws.length)} گزینه پیدا کردم:`;
+      return {
+        steps,
+        payload: {
+          reply: `${head}\n${lines.join("\n")}\nقیمت‌ها از دیتاست است و ممکن است قدیمی باشد. برای خرید حضوری همه را با هم، «برنامهٔ سفر خرید» را بچینم.`,
+          steps,
+          tool: "search_products",
+          tool_args: { query: pickedKws.join("، ") },
+          tool_result: { status: "ok", total: totalSum, items: mergedItems },
+          tool_error: null,
+          generative: null,
+          session: updatedSession,
+          suggestions: buildSuggestions(steps, updatedSession),
+          fallback: true,
+        },
+      };
+    } catch {
+      /* fall through to the single-query path */
+    }
+  }
+
   // Greeting / thanks / bye with no shopping intent → friendly canned reply
   // (never run a product search for «سلام» — it surfaced «چسب اتوکلاو سلامت…»).
-  if (!mentionsProductKeyword(message)) {
+  if (!hasProductKeyword) {
     const normTrim = normalizeText(message).trim();
     if (GREETING_RE.test(normTrim)) {
       return {
@@ -1129,11 +1318,15 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
     }
   }
   if (!candidates.length) {
+    // No usable search terms at all: either a vague shopping wish («یه چیزی
+    // میخوام») → ask for the missing category, or off-topic chat → redirect.
+    const intent = SHOPPING_INTENT_RE.test(normMsg) || hasProductKeyword;
     return {
       steps,
       payload: {
-        reply:
-          "دستیار هوشمند الان در دسترس نیست، ولی همچنان می‌توانم ساده جست‌وجو کنم. لطفاً نام محصول (مثل «ماوس بی‌سیم») را بنویس، یا از تب «جست‌وجو» استفاده کن.",
+        reply: intent
+          ? "حتماً کمکتان می‌کنم! فقط بگویید چه چیزی می‌خواهید بخرید — مثلاً «هدفون بی‌سیم زیر ۲ میلیون» یا «فروشگاه موبایل نزدیک صادقیه که قسطی بدهد»."
+          : "من ترب‌گرد هستم — دستیار خرید حضوری تهران؛ دربارهٔ خرید کمک می‌کنم: جست‌وجوی محصول، مقایسهٔ قیمت فروشگاه‌ها، ساعت کاری و برنامهٔ سفر خرید. دربارهٔ موضوع دیگری متأسفانه نمی‌توانم کمک کنم.",
         steps,
         tool: null,
         tool_args: null,
@@ -1152,21 +1345,28 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
     const filters = sessionToFilters(session);
 
     // Progressive relaxation: try the most specific candidate first; on
-    // 0 results relax (drop budget → shorter query → remembered session
-    // query) so the user still gets real products instead of an empty answer.
-    // «ارزان/ارزون» requests sort by price so the cheapest really surfaces.
-    const wantsCheapest = /ارزان|ارزون/i.test(normalizeText(message));
+    // 0 results relax (drop budget → installment → near → shorter query →
+    // remembered session query) so the user still gets real products instead
+    // of an empty answer. «ارزان/ارزون» requests sort by price so the
+    // cheapest really surfaces.
+    const wantsCheapest = /ارزان|ارزون/i.test(normMsg);
     const fallbackSort: Filters["sort"] = wantsCheapest ? "price_asc" : ((filters.sort as Filters["sort"]) || "relevance");
     let result: ReturnType<typeof tools.searchProducts> | null = null;
     let usedQuery = candidates[0];
+    let attempts = 0;
+
+    let relaxedMax = filters.max_price ?? null;
+    let relaxedMin = filters.min_price ?? null;
+    let relaxedInstallment = filters.installment_only ?? false;
+    let relaxedNear = filters.near ? resolveLocation(filters.near) : null;
 
     for (const cand of candidates) {
       const parsedCand = parseQuery(cand);
       const f: Filters = {
-        max_price: parsedCand.maxBudget ?? parsed.maxBudget ?? filters.max_price ?? null,
-        min_price: parsedCand.minBudget ?? parsed.minBudget ?? filters.min_price ?? null,
-        near: filters.near ? resolveLocation(filters.near) : null,
-        installment_only: filters.installment_only,
+        max_price: parsedCand.maxBudget ?? parsed.maxBudget ?? relaxedMax,
+        min_price: parsedCand.minBudget ?? parsed.minBudget ?? relaxedMin,
+        near: relaxedNear,
+        installment_only: relaxedInstallment,
         sort: fallbackSort,
         limit: 12,
       };
@@ -1179,22 +1379,46 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
       // keep the last attempt for the "no results" message
       result = r;
       usedQuery = cand;
-      // relax budget for the next candidate
+      attempts++;
+      // relax for the next candidate: budget first, then installment, then near
       parsed.maxBudget = null;
       parsed.minBudget = null;
+      relaxedMax = null;
+      relaxedMin = null;
+      if (attempts >= 1) relaxedInstallment = false;
+      if (attempts >= 2) relaxedNear = null;
     }
 
     const query = usedQuery;
-    const result0: NonNullable<typeof result> = result ?? tools.searchProducts(candidates[0], { limit: 12 });
+    let result0: NonNullable<typeof result> = result ?? tools.searchProducts(candidates[0], { limit: 12 });
+    // Smart 0-result probe: if filters (budget/installment/near) were applied
+    // and everything came back empty, retry once with NO filters — if the
+    // category itself exists, tell the user their budget/filters are the
+    // problem and show the cheapest real item instead of a bare «چیزی نبود».
+    let probeUsed = false;
+    if (result0.total === 0) {
+      const hadFilters =
+        relaxedMax !== null || relaxedMin !== null || relaxedInstallment || relaxedNear !== null ||
+        filters.max_price !== null || filters.min_price !== null || filters.installment_only || filters.near !== null;
+      if (hadFilters) {
+        const probe = tools.searchProducts(query, { sort: "price_asc", limit: 12 });
+        if (probe.total > 0) {
+          result0 = probe;
+          probeUsed = true;
+        }
+      }
+    }
     const fact = factLine("search_products", result0, { query });
     steps.push({
       index: 0,
       tool: "search_products",
       label: TOOL_LABELS["search_products"],
-      thinking: candidates.length > 1 && query !== candidates[0]
-        ? `اول «${candidates[0]}» جست‌وجو کردم؛ چون نتیجه نداشت عبارت را ساده‌تر کردم به «${query}»`
-        : "جست‌وجوی مستقیم در دیتابیس (حالت بدون هوش مصنوعی)",
-      args: { query, relaxed: candidates.findIndex((c) => c === query) },
+      thinking: probeUsed
+        ? `با فیلترهای شما نتیجه‌ای نبود؛ بدون فیلتر جست‌وجو کردم (حالت بدون هوش مصنوعی)`
+        : candidates.length > 1 && query !== candidates[0]
+          ? `اول «${candidates[0]}» جست‌وجو کردم؛ چون نتیجه نداشت عبارت را ساده‌تر کردم به «${query}»`
+          : "جست‌وجوی مستقیم در دیتابیس (حالت بدون هوش مصنوعی)",
+      args: { query, relaxed: candidates.findIndex((c) => c === query), probe: probeUsed },
       observation: compactResult("search_products", result0),
       status: "ok",
       fact,
@@ -1210,15 +1434,26 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
 
     const count = result0.total;
     const cheapest = result0.items.find((i) => i.min_price_toman !== null);
-    const usedMemory = candidates.length > 1 && query === candidates[candidates.length - 1] && !!session.productQuery;
+    // «از حافظهٔ گفتگو» is only honest when the message itself contained NO
+    // product keyword and the query was taken from the remembered session.
+    const usedMemory = !hasProductKeyword && !!session.productQuery && candidates.length > 1 && query === candidates[candidates.length - 1];
     const cheapestLine = cheapest && cheapest.min_price_toman !== null
       ? ` — ارزان‌ترین: «${cheapest.title}» با قیمت ${cheapest.min_price_toman.toLocaleString("fa-IR")} تومان`
       : "";
-    const reply = count > 0
-      ? usedMemory
-        ? `${count.toLocaleString("fa-IR")} محصول برای «${query}» (از حافظهٔ گفتگو) پیدا شد${cheapestLine}. برای مقایسهٔ فروشگاه‌ها روی کارت‌ها بزن یا دوباره بپرس.`
-        : `${count.toLocaleString("fa-IR")} محصول پیدا شد${cheapestLine}. برای مقایسهٔ فروشگاه‌ها روی کارت‌ها بزن یا دوباره بپرس.`
-      : "نتیجه‌ای پیدا نشد — عبارت را کلیک‌تر یا بدون فیلتر امتحان کن.";
+    let reply: string;
+    if (count > 0) {
+      reply = probeUsed
+        ? `در بودجه/فیلترهای شما چیزی پیدا نشد؛ بدون فیلتر جست‌وجو کردم — ${count.toLocaleString("fa-IR")} محصول این دسته هست${cheapestLine}. بودجه را بالاتر ببرید یا از همین گزینه‌ها انتخاب کنید.`
+        : usedMemory
+          ? `${count.toLocaleString("fa-IR")} محصول برای «${query}» (از حافظهٔ گفتگو) پیدا شد${cheapestLine}. برای مقایسهٔ فروشگاه‌ها روی کارت‌ها بزن یا دوباره بپرس.`
+          : `${count.toLocaleString("fa-IR")} محصول پیدا شد${cheapestLine}. برای مقایسهٔ فروشگاه‌ها روی کارت‌ها بزن یا دوباره بپرس.`;
+    } else if (!hasProductKeyword && !session.productQuery && !SHOPPING_INTENT_RE.test(normMsg)) {
+      // off-topic chat reached the search path → redirect instead of a
+      // confusing «نتیجه‌ای پیدا نشد» for a non-shopping message.
+      reply = "من ترب‌گرد هستم — دستیار خرید حضوری تهران؛ دربارهٔ خرید کمک می‌کنم: جست‌وجوی محصول، مقایسهٔ قیمت فروشگاه‌ها، ساعت کاری و برنامهٔ سفر خرید. دربارهٔ موضوع دیگری متأسفانه نمی‌توانم کمک کنم.";
+    } else {
+      reply = `برای «${query}» چیزی در دیتابیس ۲۲۵ هزار محصولی پیدا نکردم — عبارت را کلی‌تر بنویسید یا دستهٔ دیگری بگویید (مثل «هدفون بی‌سیم» یا «فروشگاه موبایل نزدیک صادقیه»).`;
+    }
 
     return {
       steps,

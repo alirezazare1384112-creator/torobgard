@@ -218,7 +218,7 @@ export function parseQuery(query: string): ParsedQuery {
   let termStream = budgetStripped
     .replace(/(زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از|بین)/g, " ")
     .replace(/\b(under|below|up\s*to|less\s*than|more\s*than|cheaper\s*than|max|million|billion|toman)\b/gi, " ")
-    .replace(/toman|تومان/gi, " ")
+    .replace(/toman|تومان|تومن/gi, " ")
     // standalone unit letters k/m after a number were already consumed by the
     // budget regex; drop any stragglers so they don't pollute the term stream.
     .replace(/\b[km]\b/gi, " ");
