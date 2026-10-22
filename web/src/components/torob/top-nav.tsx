@@ -37,12 +37,20 @@ export function TopNav({ view, onView }: { view: NavBarView; onView: (v: NavBarV
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-2.5">
-        {/* Logo */}
-        <button type="button" onClick={() => onView("home")} className="flex shrink-0 items-center gap-2" aria-label="ترب‌گرد — خانه">
-          <span className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-            <Store className="size-5" aria-hidden />
+        {/* Logo — TorobGard brand: red shopping bag + check mark */}
+        <button type="button" onClick={() => onView("home")} className="flex shrink-0 items-center gap-2.5" aria-label="ترب‌گرد — خانه">
+          <span className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm transition-transform hover:scale-105">
+            <svg viewBox="0 0 24 24" className="size-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z" />
+              <path d="M3 6h18" />
+              <path d="M16 10a4 4 0 01-8 0" />
+              <path d="M9 15l2 2 4-4" stroke="currentColor" strokeWidth="2.5" />
+            </svg>
           </span>
-          <span className="hidden text-lg font-extrabold tracking-tight sm:inline">ترب‌گرد</span>
+          <span className="hidden flex-col leading-none sm:flex">
+            <span className="text-lg font-extrabold tracking-tight text-primary">ترب‌گرد</span>
+            <span className="text-[10px] text-muted-foreground">دستیار خرید حضوری تهران</span>
+          </span>
         </button>
 
         {/* Tabs — desktop */}
