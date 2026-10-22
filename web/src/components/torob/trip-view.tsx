@@ -23,6 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCart } from "./cart-store";
 import { SyntheticNameBadge } from "./disclaimers";
 import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
+import { RouteMap, type MapStop } from "./route-map";
 import type { SearchItem, SearchResponse } from "./types";
 
 /**
@@ -55,12 +56,6 @@ const NB_COORDS: Record<string, [number, number]> = {
   "صادقیه": [35.7467, 51.336], "ولنجک": [35.779, 51.387], "ونک": [35.765, 51.412],
   "میدان ولیعصر": [35.6997, 51.413], "تجریش": [35.805, 51.43], "شریعتی": [35.76, 51.433],
 };
-
-// Tehran bbox for the schematic map
-const LAT_MIN = 35.64, LAT_MAX = 35.81, LON_MIN = 51.31, LON_MAX = 51.51;
-const VB_W = 600, VB_H = 500, PAD = 30;
-function lonToX(lon: number) { return PAD + ((lon - LON_MIN) / (LON_MAX - LON_MIN)) * (VB_W - 2 * PAD); }
-function latToY(lat: number) { return PAD + ((LAT_MAX - lat) / (LAT_MAX - LAT_MIN)) * (VB_H - 2 * PAD); }
 
 /** Google Maps directions URL from start to a destination lat/lon. */
 function gmapsDirectionsUrl(from: { lat: number; lon: number } | null, to: { lat: number; lon: number }): string {
@@ -174,14 +169,6 @@ export function TripView() {
     }
     return ordered;
   }, [plan, loc]);
-
-  // schematic route points (use the ordered plan)
-  const mappedStops = orderedPlan.filter((s) => s.shop.lat !== null && s.shop.lon !== null);
-  const points = [
-    loc ? { x: lonToX(loc.lon), y: latToY(loc.lat), label: loc.label, isStart: true } : null,
-    ...mappedStops.map((s) => ({ x: lonToX(s.shop.lon!), y: latToY(s.shop.lat!), label: s.shop.name, isStart: false })),
-  ].filter(Boolean) as { x: number; y: number; label: string; isStart: boolean }[];
-  const pathD = points.length > 1 ? points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ") : "";
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:py-8">
@@ -305,64 +292,27 @@ export function TripView() {
             <p className="text-sm text-amber-600">هیچ فروشگاهی برای این محصولات پیدا نشد. محصولات را عوض کن یا حداکثر توقف‌ها را زیاد کن.</p>
           ) : (
             <>
-              {/* Real OpenStreetMap embed (no API key needed) showing the area
-                  covering the start + all stops. Below it, the schematic SVG
-                  shows the route with shop names. */}
+              {/* Interactive OpenStreetMap (Leaflet) showing the start + all
+                  stops as markers + a dashed polyline connecting them in order.
+                  No API key needed. Replaces the old crude SVG schematic. */}
               {(() => {
-                // Compute bbox covering start + all stops
-                const lats: number[] = [];
-                const lons: number[] = [];
-                if (loc) { lats.push(loc.lat); lons.push(loc.lon); }
-                mappedStops.forEach((s) => { if (s.shop.lat !== null && s.shop.lon !== null) { lats.push(s.shop.lat!); lons.push(s.shop.lon!); } });
-                if (lats.length >= 2) {
-                  const minLat = Math.min(...lats) - 0.005;
-                  const maxLat = Math.max(...lats) + 0.005;
-                  const minLon = Math.min(...lons) - 0.005;
-                  const maxLon = Math.max(...lons) + 0.005;
-                  // OSM embed: bbox=minLon,minLat,maxLon,maxLat&marker=start
-                  const marker = loc ? `&marker=${loc.lat},${loc.lon}` : "";
-                  const osmUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${minLon},${minLat},${maxLon},${maxLat}&layer=mapnik${marker}`;
-                  return (
-                    <div className="overflow-hidden rounded-lg border border-border">
-                      <iframe
-                        title="نقشهٔ مسیر خرید"
-                        src={osmUrl}
-                        className="h-64 w-full"
-                        loading="lazy"
-                        style={{ border: 0 }}
-                      />
-                      <p className="bg-muted/30 px-3 py-1.5 text-[11px] text-muted-foreground">
-                        نقشهٔ واقعی (OpenStreetMap) — نقطهٔ سبز = شروع. برای مسیر هر توقف از لینک گوگل مپ پایین استفاده کن.
-                      </p>
-                    </div>
-                  );
+                const mapStops: MapStop[] = [];
+                if (loc) {
+                  mapStops.push({ lat: loc.lat, lon: loc.lon, label: loc.label, isStart: true, subtitle: "موقعیت شروع شما" });
                 }
+                orderedPlan.forEach((stop, idx) => {
+                  if (stop.shop.lat !== null && stop.shop.lon !== null) {
+                    mapStops.push({
+                      lat: stop.shop.lat!,
+                      lon: stop.shop.lon!,
+                      label: stop.shop.name,
+                      subtitle: `توقف ${idx + 1} • ${stop.items.length} کالا • ${formatToman(stop.subtotal_toman)}`,
+                    });
+                  }
+                });
+                if (mapStops.length >= 1) return <RouteMap stops={mapStops} />;
                 return null;
               })()}
-
-              {/* Schematic route map with shop names */}
-              {points.length > 0 && (
-                <div className="rounded-lg border border-border bg-muted/20 p-2">
-                  <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="h-auto w-full" role="img" aria-label="مسیر شماتیک خرید">
-                    {/* Neighborhood reference points (light gray dots) */}
-                    {Object.entries(NB_COORDS).map(([name, [nlat, nlon]]) => (
-                      <g key={name} transform={`translate(${lonToX(nlon)}, ${latToY(nlat)})`}>
-                        <circle r={2} className="fill-muted-foreground/30" />
-                        <text x={4} y={3} className="fill-muted-foreground/50 text-[9px]" style={{ fontFamily: "var(--font-vazirmatn), sans-serif" }}>{name}</text>
-                      </g>
-                    ))}
-                    <rect x={PAD} y={PAD} width={VB_W - 2 * PAD} height={VB_H - 2 * PAD} rx={16} className="fill-background/50 stroke-border/50" strokeWidth={1} />
-                    {pathD && <path d={pathD} fill="none" className="stroke-primary" strokeWidth={2.5} strokeDasharray="6 6" />}
-                    {points.map((p, i) => (
-                      <g key={i} transform={`translate(${p.x}, ${p.y})`}>
-                        <circle r={p.isStart ? 7 : 6} className={p.isStart ? "fill-emerald-600" : "fill-primary"} stroke="white" strokeWidth={1.5} />
-                        <text x={10} y={0} className="fill-foreground text-[12px] font-medium" style={{ fontFamily: "var(--font-vazirmatn), sans-serif" }}>{p.isStart ? "📍 شروع" : `${toPersianDigits(i)}. ${p.label}`}</text>
-                      </g>
-                    ))}
-                  </svg>
-                  <p className="mt-1 text-[11px] text-muted-foreground">مسیر شماتیک با نام فروشگاه‌ها — برای مسیر واقعی از لینک مپ هر توقف استفاده کن.</p>
-                </div>
-              )}
 
               <ol className="grid gap-2">
                 {orderedPlan.map((stop, idx) => {
