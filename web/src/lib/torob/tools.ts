@@ -271,11 +271,16 @@ export class ShoppingTools {
     }
     if (f.near) {
       const [lat, lon] = f.near;
-      const radius = f.radius_km ?? 5.0;
+      // When radius_km is explicitly set, use it as a hard filter. When it's
+      // null, use a LARGE bounding box (~30km) purely as a SQL pre-filter so
+      // we don't compute haversine for shops in Shiraz — but it must NOT hide
+      // any shop in greater Tehran. 30km covers all of Tehran + suburbs.
+      // The actual radius filtering (if any) happens in the post-filter loop.
+      const radius = f.radius_km ?? 30.0;
       const dlat = radius / 111.0;
       const dlon = radius / (111.0 * Math.cos((lat * Math.PI) / 180));
       conds.push(
-        "AND o.shop_id IN (SELECT shop_id FROM shops WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?)"
+        "AND o.shop_id IN (SELECT shop_id FROM shops WHERE lat IS NOT NULL AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?)"
       );
       params.push(lat - dlat, lat + dlat, lon - dlon, lon + dlon);
     }
@@ -309,8 +314,11 @@ export class ShoppingTools {
     const connConds: string[] = [];
     const connParams: string[] = [];
     if (parsed.connectivity === "wireless") {
-      connConds.push("AND (p.title_norm LIKE ? OR p.title_norm LIKE ?)");
-      connParams.push("%بی سیم%", "%wireless%");
+      // title_norm uses spaces (ZWNJ collapsed). Match any of the wireless
+      // markers: "بی سیم" (Persian), "wireless" (English), "وایرلس" (Persian
+      // transliteration of "wireless"). Each needs its own LIKE ? placeholder.
+      connConds.push("AND (p.title_norm LIKE ? OR p.title_norm LIKE ? OR p.title_norm LIKE ?)");
+      connParams.push("%بی سیم%", "%wireless%", "%وایرلس%");
       connConds.push("AND p.title_norm NOT LIKE ?");
       connConds.push("AND p.title_norm NOT LIKE ?");
       connConds.push("AND p.title_norm NOT LIKE ?");
@@ -470,6 +478,18 @@ export class ShoppingTools {
       sorted.sort(
         (a, b) =>
           (b.item.min_price_toman ?? -Infinity) - (a.item.min_price_toman ?? -Infinity)
+      );
+    } else if (f.sort === "distance" && f.near) {
+      // distance sort: nearest first; null distances (no nearest shop with
+      // coords) pushed to the end. Falls back to price-asc when there's no
+      // `near` (distance is undefined — can't sort by it).
+      sorted.sort(
+        (a, b) => {
+          const ad = a.item.distance_km ?? Infinity;
+          const bd = b.item.distance_km ?? Infinity;
+          if (ad !== bd) return ad - bd;
+          return (a.item.min_price_toman ?? Infinity) - (b.item.min_price_toman ?? Infinity);
+        }
       );
     } else if (parsed.connectivity) {
       // relevance with device intent: score desc (accessories last), price asc within tier
@@ -923,7 +943,11 @@ export class ShoppingTools {
   recordSellerConfirmation(args: {
     shop_id: string;
     product_id: string;
-    status: "confirmed" | "pending" | "no_response" | "unconfirmed";
+    /** confirmed = seller confirmed price+stock; pending = waiting for seller
+     *  response; no_response = seller didn't answer; unavailable = seller
+     *  confirmed the product is out of stock / not carried; unconfirmed =
+     *  default, no manual contact attempted yet. */
+    status: "confirmed" | "pending" | "no_response" | "unavailable" | "unconfirmed";
     confirmed_price_toman?: number | null;
     in_stock?: boolean | null;
     note?: string | null;
@@ -1107,7 +1131,7 @@ export interface SellerInquiryResponse {
 export interface ConfirmationRecord {
   shop_id: string;
   product_id: string;
-  status: "confirmed" | "pending" | "no_response" | "unconfirmed";
+  status: "confirmed" | "pending" | "no_response" | "unavailable" | "unconfirmed";
   confirmed_price_toman: number | null;
   in_stock: boolean | null;
   note: string | null;

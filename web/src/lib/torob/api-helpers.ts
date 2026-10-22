@@ -51,8 +51,18 @@ export function parseFilters(sp: URLSearchParams): Filters {
 
 export function handleToolError(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e);
-  const isValidation = /invalid|outside|max_price|min_price|budget|items must|sort/i.test(msg);
-  return errorJson(msg, isValidation ? 400 : 500, isValidation ? "validation_error" : "server_error");
+  const isValidation = /invalid|outside|max_price|min_price|budget|items must|sort|too long|too many/i.test(msg);
+  if (isValidation) {
+    // Validation errors are short, user-facing strings — safe to return.
+    return errorJson(msg, 400, "validation_error");
+  }
+  // For server errors (5xx), do NOT return raw e.message — it can leak the
+  // absolute filesystem path of the SQLite DB and DB schema details
+  // (better-sqlite3 messages like "unable to open database file:
+  // /home/z/my-project/data/torob.sqlite"). Log server-side only.
+  // eslint-disable-next-line no-console
+  console.error("[api] server error:", msg);
+  return errorJson("internal_error", 500, "server_error");
 }
 
 export { getTools };

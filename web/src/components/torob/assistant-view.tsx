@@ -3,6 +3,7 @@
 import * as React from "react";
 import { motion } from "framer-motion";
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowRight,
   Bot,
@@ -187,7 +188,7 @@ function VerifyPanel({ offer }: { offer: any }) {
   const shop = offer.shop;
   const shopId = shop?.shop_id;
   const pid = shop?.product_id;
-  const [status, setStatus] = React.useState<"unconfirmed" | "pending" | "confirmed" | "no_response">("unconfirmed");
+  const [status, setStatus] = React.useState<"unconfirmed" | "pending" | "confirmed" | "no_response" | "unavailable">("unconfirmed");
   const [inquiry, setInquiry] = React.useState<string | null>(null);
   const [loadingInquiry, setLoadingInquiry] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
@@ -210,23 +211,30 @@ function VerifyPanel({ offer }: { offer: any }) {
     if (!inquiry) return;
     try { await navigator.clipboard.writeText(inquiry); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {}
   };
-  const save = async (s: "confirmed" | "pending" | "no_response" | "unconfirmed") => {
+  const save = async (s: "confirmed" | "pending" | "no_response" | "unavailable" | "unconfirmed") => {
     if (!shopId || !pid) return;
     setSaving(true);
     try {
       await fetch("/api/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shop_id: shopId, product_id: pid, status: s, confirmed_price_toman: confirmedPrice ? Number(confirmedPrice) : null, in_stock: inStock }) });
       setStatus(s);
-      setSavedNote(s === "confirmed" ? "ثبت شد (همین session)." : s === "no_response" ? "بدون پاسخ — جایگزین پیشنهاد می‌شود." : "در انتظار پاسخ فروشنده.");
+      setSavedNote(
+        s === "confirmed" ? "تأیید شد (همین session)."
+        : s === "no_response" ? "بدون پاسخ — جایگزین پیشنهاد می‌شود."
+        : s === "unavailable" ? "ناموجود — جایگزین پیشنهاد می‌شود."
+        : s === "pending" ? "در انتظار پاسخ فروشنده."
+        : "ثبت شد."
+      );
     } catch {}
     setSaving(false);
   };
 
   const phone = shop?.contacts?.find((c: any) => c.channel === "phone")?.display_number;
   const statusBadge = {
-    unconfirmed: { label: "تأییدنشده", cls: "bg-muted text-muted-foreground" },
+    unconfirmed: { label: "قیمت ثبت‌شده (تأییدنشده)", cls: "bg-muted text-muted-foreground" },
     pending: { label: "در انتظار پاسخ", cls: "bg-amber-500/15 text-amber-700" },
-    confirmed: { label: "تأیید شد ✓", cls: "bg-emerald-600 text-white" },
+    confirmed: { label: "تأیید فروشنده ✓", cls: "bg-emerald-600 text-white" },
     no_response: { label: "پاسخ دریافت نشد", cls: "bg-destructive text-white" },
+    unavailable: { label: "ناموجود", cls: "bg-red-500/15 text-red-700" },
   }[status];
 
   return (
@@ -264,12 +272,17 @@ function VerifyPanel({ offer }: { offer: any }) {
           </div>
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
-          <Button type="button" size="sm" className="h-9 gap-1.5 bg-emerald-600 text-white hover:bg-emerald-600" disabled={saving} onClick={() => save("confirmed")}><ShieldCheck className="size-3.5" aria-hidden />تأیید شد</Button>
+          <Button type="button" size="sm" className="h-9 gap-1.5 bg-emerald-600 text-white hover:bg-emerald-600" disabled={saving} onClick={() => save("confirmed")}><ShieldCheck className="size-3.5" aria-hidden />تأیید فروشنده</Button>
           <Button type="button" variant="outline" size="sm" className="h-9" disabled={saving} onClick={() => save("pending")}>در انتظار</Button>
           <Button type="button" variant="outline" size="sm" className="h-9" disabled={saving} onClick={() => save("no_response")}>پاسخی نیامد</Button>
+          <Button type="button" variant="outline" size="sm" className="h-9" disabled={saving} onClick={() => save("unavailable")}>ناموجود</Button>
         </div>
         {savedNote && <p className="mt-1.5 text-xs text-muted-foreground">{savedNote}</p>}
         <p className="mt-1 text-[11px] text-amber-600">قیمت‌ها ممکن است قدیمی باشند — قبل از مراجعه تماس بگیرید. ثبت‌ها فقط همین نشست نگه‌داری می‌شوند.</p>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          <AlertCircle className="ml-1 inline size-3 align-middle" aria-hidden />
+          ارسال خودکار پیام به فروشنده پیکربندی‌نشده است (not_configured). متن را کپی کن و خودت از طریق تلفن یا پیام‌رسان ارسال کن — ما پیام را جای تو نمی‌فرستیم.
+        </p>
       </div>
     </div>
   );

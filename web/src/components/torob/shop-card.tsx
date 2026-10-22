@@ -32,17 +32,18 @@ import type { ShopItem } from "./types";
  * confirmation states, and seller-contact workflow.
  *
  * Confirmation states (Phase 5 §6):
- * - "unconfirmed" → gray badge "تأییدنشده"
+ * - "unconfirmed" → gray badge "قیمت ثبت‌شده (تأییدنشده)"
  * - "pending" → amber badge "در انتظار پاسخ"
- * - "confirmed" → green badge "تأیید شد"
+ * - "confirmed" → green badge "تأیید فروشنده"
  * - "no_response" → red badge "پاسخ دریافت نشد"
+ * - "unavailable" → red badge "ناموجود" (seller confirmed out of stock)
  *
  * Never assumes a shop has stock, is open, or offers installments
  * without verified data. Shows "نامشخص" for unknown fields.
  */
 
 interface SellerConfirmState {
-  status: "unconfirmed" | "pending" | "confirmed" | "no_response";
+  status: "unconfirmed" | "pending" | "confirmed" | "no_response" | "unavailable";
   confirmedPrice: string;
   inStock: boolean | null;
   note: string;
@@ -126,10 +127,11 @@ export function ShopCard({
   };
 
   const statusBadge = {
-    unconfirmed: { label: "تأییدنشده", cls: "bg-muted text-muted-foreground" },
+    unconfirmed: { label: "قیمت ثبت‌شده (تأییدنشده)", cls: "bg-muted text-muted-foreground" },
     pending: { label: "در انتظار پاسخ", cls: "bg-amber-500/15 text-amber-700" },
-    confirmed: { label: "تأیید شد ✓", cls: "bg-emerald-600 text-white" },
+    confirmed: { label: "تأیید فروشنده ✓", cls: "bg-emerald-600 text-white" },
     no_response: { label: "پاسخ دریافت نشد", cls: "bg-destructive text-white" },
+    unavailable: { label: "ناموجود", cls: "bg-red-500/15 text-red-700" },
   }[confirmState.status];
 
   return (
@@ -227,17 +229,19 @@ export function ShopCard({
             </div>
             <div className="mt-2 flex flex-wrap gap-1.5">
               <Button type="button" size="sm" className="h-9 gap-1.5 bg-emerald-600 text-white hover:bg-emerald-600" disabled={saving} onClick={() => saveConfirmation("confirmed")}>
-                <ShieldCheck className="size-3.5" aria-hidden />تأیید شد
+                <ShieldCheck className="size-3.5" aria-hidden />تأیید فروشنده
               </Button>
               <Button type="button" variant="outline" size="sm" className="h-9" disabled={saving} onClick={() => saveConfirmation("pending")}>در انتظار</Button>
               <Button type="button" variant="outline" size="sm" className="h-9" disabled={saving} onClick={() => saveConfirmation("no_response")}>پاسخی نیامد</Button>
+              <Button type="button" variant="outline" size="sm" className="h-9" disabled={saving} onClick={() => saveConfirmation("unavailable")}>ناموجود</Button>
             </div>
             {confirmState.status !== "unconfirmed" && (
               <p className="mt-1 text-[11px] text-muted-foreground">
-                {confirmState.status === "confirmed" ? "قیمت و موجودی توسط شما تأیید شد (در همین نشست)." : confirmState.status === "no_response" ? "فروشنده پاسخ نداد — فروشگاه‌های جایگزین را ببینید." : "در انتظار پاسخ فروشنده."}
+                {confirmState.status === "confirmed" ? "قیمت و موجودی توسط شما تأیید شد (در همین نشست)." : confirmState.status === "no_response" ? "فروشنده پاسخ نداد — فروشگاه‌های جایگزین را ببینید." : confirmState.status === "unavailable" ? "ناموجود — جایگزین‌های مرتبط را ببینید." : "در انتظار پاسخ فروشنده."}
               </p>
             )}
             <p className="mt-1 text-[11px] text-amber-600">قیمت‌ها ممکن است قدیمی باشند. ثبت‌ها فقط همین نشست نگه‌داری می‌شوند.</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">ارسال خودکار پیام به فروشنده پیکربندی‌نشده است (not_configured) — متن را کپی کن و خودت ارسال کن.</p>
           </div>
         )}
 

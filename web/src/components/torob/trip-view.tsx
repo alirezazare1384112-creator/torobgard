@@ -86,6 +86,16 @@ export function TripView() {
   const [planning, setPlanning] = React.useState(false);
   const [planError, setPlanError] = React.useState<string | null>(null);
 
+  // Routing provider status — fetched once on mount. Shows whether real road
+  // routing (Neshan) is configured or distances are straight-line estimates.
+  const [routingMode, setRoutingMode] = React.useState<"real_road" | "straight_line_estimate" | null>(null);
+  React.useEffect(() => {
+    fetch("/api/route")
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((j: { mode: "real_road" | "straight_line_estimate" }) => setRoutingMode(j.mode))
+      .catch(() => setRoutingMode(null));
+  }, []);
+
   const search = (q: string) => {
     if (!q.trim()) return;
     setSearching(true);
@@ -176,13 +186,23 @@ export function TripView() {
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:py-8">
       <header className="flex flex-col gap-1">
-        <h2 className="flex items-center gap-2 text-xl font-bold">
-          <Route className="size-5" aria-hidden />برنامهٔ خرید
-        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-xl font-bold">
+            <Route className="size-5" aria-hidden />برنامهٔ خرید
+          </h2>
+          {routingMode && (
+            <Badge variant={routingMode === "real_road" ? "default" : "outline"} className="gap-1 text-[11px]">
+              <Navigation className="size-3" aria-hidden />
+              {routingMode === "real_road" ? "مسیریابی واقعی (نشان)" : "فاصلهٔ هوایی (مسیریابی تنظیم‌نشده)"}
+            </Badge>
+          )}
+        </div>
         <p className="text-sm text-muted-foreground">
           محصول‌هایی که از جست‌وجو اضافه کردی اینجا جمع می‌شوند. موقعیتت را مشخص کن، برنامه را بساز،
-          و برای هر توقف مسیر رسیدن در گوگل مپ و فاصله را ببین. مسیر روی نقشه شماتیک است (فاصلهٔ هوایی)،
-          ولی لینک مپ واقعی است.
+          و برای هر توقف مسیر رسیدن در گوگل مپ و فاصله را ببین.{" "}
+          {routingMode === "real_road"
+            ? "مسیرها بر اساس مسیریابی واقعی جاده‌ای (نشان) محاسبه می‌شوند."
+            : "مسیر روی نقشه شماتیک است (فاصلهٔ هوایی)، ولی لینک مپ واقعی است."}
         </p>
       </header>
 

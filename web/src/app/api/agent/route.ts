@@ -249,16 +249,34 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
+  if (question.length > 2000) {
+    return NextResponse.json(
+      { error: "message too long (max 2000 chars)", code: "validation_error" } satisfies AgentResponseBody,
+      { status: 400 }
+    );
+  }
   const history: Msg[] = Array.isArray(body?.history)
     ? body.history.filter(
         (m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string"
-      )
+      ).slice(-10)  // keep at most last 10 turns to bound prompt size
     : [];
 
   // Session state (persisted client-side, sent back each turn)
-  let session: ShoppingSession = body?.session
-    ? { ...createSession(), ...body.session }
-    : createSession();
+  // Validate the shape defensively — a malicious client could send any JSON.
+  let session: ShoppingSession = createSession();
+  if (body?.session && typeof body.session === "object") {
+    const s = body.session as Record<string, unknown>;
+    // Only copy known fields with the right types; ignore everything else.
+    if (typeof s.category === "string" || s.category === null) session.category = s.category as string | null;
+    if (typeof s.productQuery === "string" || s.productQuery === null) session.productQuery = s.productQuery as string | null;
+    if (typeof s.budgetMin === "number" || s.budgetMin === null) session.budgetMin = s.budgetMin as number | null;
+    if (typeof s.budgetMax === "number" || s.budgetMax === null) session.budgetMax = s.budgetMax as number | null;
+    if (typeof s.priority === "string" || s.priority === null) session.priority = s.priority as any;
+    if (typeof s.intendedUse === "string" || s.intendedUse === null) session.intendedUse = s.intendedUse as any;
+    if (typeof s.installmentOnly === "boolean") session.installmentOnly = s.installmentOnly;
+    if (typeof s.neighborhood === "string" || s.neighborhood === null) session.neighborhood = s.neighborhood as string | null;
+    if (Array.isArray(s.answersGiven)) session.answersGiven = s.answersGiven.filter((x: unknown) => typeof x === "string") as any;
+  }
 
   // Update session from the user's message (simple keyword extraction)
   // Budget: look for numbers + میلیون/هزار/میلیارد (also normalize Persian digits first)
