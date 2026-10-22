@@ -78,6 +78,10 @@ const STARTERS = [
   "برنامه خرید ماوس و کیبورد و هدفون",
 ];
 
+/** Hard cap matching the server's Zod limit (message ≤ 2000 chars) so a long
+ *  paste can never 400 the request — the input itself blocks more text. */
+const MAX_MESSAGE_LEN = 2000;
+
 function trimResult(r: unknown): string {
   try {
     const s = JSON.stringify(r, null, 2);
@@ -396,6 +400,10 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
   const scrollRef = React.useRef<HTMLDivElement>(null);
   // keep the live message id so stream events can patch it
   const liveIdRef = React.useRef<string | null>(null);
+  // synchronous re-entrancy lock: React's setLoading is async, so two rapid
+  // chip clicks could both pass the `loading` check and fire two interleaved
+  // requests (double bubbles, cross-patched streams). A ref is immediate.
+  const busyRef = React.useRef(false);
 
   React.useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -426,13 +434,28 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
   }, []);
 
   const send = async (text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed || loading) return;
-    const history = messages.map((m) => ({ role: m.role, content: m.text }));
-    // cross-turn tool memory: one compact fact line per executed step
+    const trimmed = text.trim().slice(0, MAX_MESSAGE_LEN);
+    if (!trimmed || loading || busyRef.current) return;
+    busyRef.current = true;
+    // Heal any stuck streaming placeholder from an interrupted previous turn
+    // (e.g. stream died mid-request): give it a graceful text and stop the
+    // spinner so it can never leak an empty content into history.
+    setMessages((ms) => ms.map((m) =>
+      m.streaming
+        ? { ...m, streaming: false, text: m.text || "ارتباط قبلی ناتمام ماند — دوباره بپرسید." }
+        : m
+    ));
+    // Defensive: cap each history entry AND never send empty/streaming
+    // contents — an empty string would 400 the whole request server-side.
+    const history = messages
+      .filter((m) => !m.streaming && m.text.trim().length > 0)
+      .map((m) => ({ role: m.role, content: m.text.slice(0, 900) }));
+    // cross-turn tool memory: one compact fact line per executed step.
+    // Hard-capped client-side too: a bulky fact line would 400 the next turn.
     const facts = messages
       .flatMap((m) => (m.steps ?? []).map((s) => s.fact))
       .filter((f): f is string => typeof f === "string" && f.trim().length > 0)
+      .map((f) => (f.length > 500 ? f.slice(0, 500) : f))
       .slice(-10);
 
     const liveId = `a-${Date.now()}`;
@@ -511,6 +534,7 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
       patchLive({ text: `خطا در ارتباط با دستیار: ${e instanceof Error ? e.message : String(e)}`, streaming: false });
     } finally {
       liveIdRef.current = null;
+      busyRef.current = false;
       setLoading(false);
     }
   };
@@ -629,8 +653,10 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
                       <button
                         key={s.label}
                         type="button"
+                        disabled={loading}
                         onClick={() => send(s.message)}
-                        className="flex min-h-8 items-center gap-1 rounded-full border border-primary/40 bg-primary/5 px-2.5 text-[11px] text-primary transition-colors hover:bg-primary/10"
+                        title={s.message}
+                        className="flex min-h-8 items-center gap-1 rounded-full border border-primary/40 bg-primary/5 px-2.5 text-[11px] text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Sparkles className="size-3" aria-hidden />
                         {s.label}
@@ -681,7 +707,12 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
         )}
 
         <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="flex items-end gap-2 border-t border-border p-3">
-          <Textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); } }} placeholder="بنویس… (Enter برای ارسال)" className="min-h-11 max-h-32 flex-1 resize-none" aria-label="پیام به دستیار" rows={1} />
+          <div className="flex min-h-11 max-h-32 flex-1 flex-col gap-0.5">
+            <Textarea value={input} onChange={(e) => setInput(e.target.value.slice(0, MAX_MESSAGE_LEN))} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); } }} placeholder="بنویس… (Enter برای ارسال)" className="min-h-11 max-h-32 flex-1 resize-none" aria-label="پیام به دستیار" rows={1} maxLength={MAX_MESSAGE_LEN} />
+            {input.length > MAX_MESSAGE_LEN - 200 && (
+              <p className="text-right text-[10px] text-muted-foreground" dir="ltr">{toPersianDigits(input.length)}/{toPersianDigits(MAX_MESSAGE_LEN)}</p>
+            )}
+          </div>
           <Button type="submit" size="icon" className="size-11 shrink-0" disabled={loading || !input.trim()}>{loading ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Send className="size-4" aria-hidden />}<span className="sr-only">ارسال</span></Button>
         </form>
       </Card>

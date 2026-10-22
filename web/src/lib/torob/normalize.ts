@@ -44,10 +44,12 @@ export function normalizeText(value: string | null | undefined): string {
   let v = "";
   for (const ch of value) v += translateChar(ch);
   v = v.toLowerCase();
-  // Remove comma thousands-separators from numbers BEFORE stripping punctuation,
-  // so "2,000,000" → "2000000" (not "2 000 000"). Only strip commas between
-  // digits, NOT dots (which may be decimal points like "1.5").
-  v = v.replace(/(\d),(?=\d)/g, "$1");
+  // Remove thousands-separators from numbers BEFORE stripping punctuation,
+  // so "2,000,000" → "2000000" (not "2 000 000"). Handles ASCII commas AND the
+  // Arabic thousands separator U+066C used by fa-IR formatting («۱٬۰۰۰٬۰۰۰»).
+  // Only strips separators followed by a 3-digit group, so decimal commas
+  // like "2,5" (rare) survive. Dots may be decimal points like "1.5" — kept.
+  v = v.replace(/(\d)[٬,](?=\d{3}(?!\d))/g, "$1");
   v = v.replace(/[\u064B-\u065F]/g, ""); // strip Arabic diacritics
   // JS \w is ASCII-only (unlike Python's Unicode \w); use property escapes so
   // Persian letters/digits are preserved while punctuation is dropped.

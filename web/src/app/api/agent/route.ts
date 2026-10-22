@@ -5,6 +5,7 @@ import { getTools, resolveLocation, NEIGHBORHOODS, type Filters } from "@/lib/to
 import { buildSystemPrompt } from "@/lib/torob/agent-tools";
 import { hasProfanity, sanitizeForModel, sanitizeText } from "@/lib/torob/moderation";
 import { parseQuery, normalizeText } from "@/lib/torob/normalize";
+import { toPersianDigits } from "@/components/torob/format";
 import {
   createSession,
   updateSession,
@@ -139,7 +140,7 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 /** LLM call with retry + exponential backoff for transient 429s. */
-async function callLLM(zai: Awaited<ReturnType<typeof ZAI.create>>, messages: Msg[], attempts = 3): Promise<string> {
+async function callLLM(zai: Awaited<ReturnType<typeof ZAI.create>>, messages: Msg[], attempts = 4): Promise<string> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -151,9 +152,9 @@ async function callLLM(zai: Awaited<ReturnType<typeof ZAI.create>>, messages: Ms
     } catch (e) {
       lastErr = e;
       const msg = e instanceof Error ? e.message : String(e);
-      const transient = msg.includes("429") || msg.includes("Too many requests") || msg.includes("timeout");
+      const transient = msg.includes("429") || msg.includes("Too many requests") || msg.includes("timeout") || msg.includes("ECONNRESET") || msg.includes("socket hang up");
       if (transient && i < attempts - 1) {
-        await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
+        await new Promise((r) => setTimeout(r, 3500 * (i + 1)));
         continue;
       }
       throw e;
@@ -244,26 +245,38 @@ function extractAction(text: string): ParsedAction | null {
   return null;
 }
 
-/** Whitelisted session patch from the model's "remember" field. */
+/** Whitelisted session patch from the model's "remember" field.
+ *  IMPORTANT: every value is capped/whitelisted so a hallucinated value can
+ *  never poison the session and fail the NEXT request's Zod validation
+ *  (e.g. priority="foo" or budgetMax=10^15 would 400 the follow-up turn). */
 function applyRemember(session: ShoppingSession, remember: Record<string, unknown>): ShoppingSession {
   const patch: Partial<ShoppingSession> = {};
   const answers = new Set(session.answersGiven);
-  const s = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const cap = (v: string, max: number) => (v.length > max ? v.slice(0, max) : v);
+  const s = (v: unknown, max = 120) => {
+    if (typeof v !== "string") return null;
+    const t = v.trim();
+    return t ? cap(t, max) : null;
+  };
 
-  const category = s(remember.category);
+  const category = s(remember.category, 120);
   if (category) patch.category = category;
-  const productQuery = s(remember.productQuery);
+  const productQuery = s(remember.productQuery, 200);
   if (productQuery) patch.productQuery = productQuery;
-  const intendedUse = s(remember.intendedUse);
+  const intendedUse = s(remember.intendedUse, 50);
   if (intendedUse) { patch.intendedUse = intendedUse; answers.add("use"); }
-  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.round(v)) : null);
+  const n = (v: unknown, max = 10_000_000_000) =>
+    typeof v === "number" && Number.isFinite(v) ? Math.min(Math.max(0, Math.round(v)), max) : null;
   const budgetMin = n(remember.budgetMin);
   if (budgetMin !== null) { patch.budgetMin = budgetMin; answers.add("budget"); }
   const budgetMax = n(remember.budgetMax);
   if (budgetMax !== null) { patch.budgetMax = budgetMax; answers.add("budget"); }
-  const priority = s(remember.priority);
-  if (priority) { patch.priority = priority as ShoppingSession["priority"]; answers.add("priority"); }
-  const brandPreference = s(remember.brandPreference);
+  const priority = s(remember.priority, 30);
+  if (priority && (PRIORITY_VALUES as readonly string[]).includes(priority)) {
+    patch.priority = priority as ShoppingSession["priority"];
+    answers.add("priority");
+  }
+  const brandPreference = s(remember.brandPreference, 100);
   if (brandPreference) patch.brandPreference = brandPreference;
   if (typeof remember.installmentOnly === "boolean") {
     patch.installmentOnly = remember.installmentOnly;
@@ -313,7 +326,33 @@ function cleanReply(s: string): string {
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/__(.+?)__/g, "$1")
     .replace(/^#+\s*/gm, "")
+    .replace(/`{1,3}/g, "")
     .trim();
+}
+
+/** English tool identifiers → Persian labels so the user-visible "thinking"
+ *  trace reads as natural Persian (models like writing tool names in English). */
+const TOOL_NAME_FA: Record<string, string> = {
+  search_products: "جست‌وجوی محصولات",
+  get_product_details: "جزئیات محصول",
+  compare_offers: "مقایسهٔ پیشنهادها",
+  find_shops: "یافتن فروشگاه‌ها",
+  find_alternatives: "یافتن جایگزین‌ها",
+  plan_shopping_trip: "برنامه‌ریزی سفر خرید",
+  check_shop_hours: "بررسی ساعت کاری",
+  prepare_seller_inquiry: "آماده‌سازی پیام فروشنده",
+  ask_user: "پرسش از کاربر",
+  product_id: "شناسهٔ محصول",
+  shop_id: "شناسهٔ فروشگاه",
+};
+
+function cleanThinking(s: string): string {
+  if (!s) return s;
+  let out = s;
+  for (const [en, fa] of Object.entries(TOOL_NAME_FA)) {
+    out = out.split(en).join(fa);
+  }
+  return out.trim();
 }
 
 function execTool(name: string, args: Record<string, any>): unknown {
@@ -499,16 +538,19 @@ function fmtToman(n: number | null | undefined): string {
 function factLine(name: string, result: unknown, args: Record<string, unknown>): string | null {
   try {
     const r = result as any;
+    let line: string | null = null;
     switch (name) {
       case "search_products": {
         if (!r || !Array.isArray(r.items)) return null;
         const best = r.items.find((i: any) => typeof i.min_price_toman === "number");
         const q = args.query ? String(args.query) : "";
-        return `search_products("${q}") → ${r.total ?? r.items.length} results${best ? `; cheapest: "${best.title}" (${best.product_id}, ${fmtToman(best.min_price_toman)}, ${best.offer_count} offers)` : ""}`;
+        line = `search_products("${q}") → ${r.total ?? r.items.length} results${best ? `; cheapest: "${best.title}" (${best.product_id}, ${fmtToman(best.min_price_toman)}, ${best.offer_count} offers)` : ""}`;
+        break;
       }
       case "get_product_details": {
         if (!r || !r.product_id) return null;
-        return `get_product_details(${r.product_id}) → "${r.title}" brand=${r.brand ?? "?"} offers=${r.offer_count ?? 0}`;
+        line = `get_product_details(${r.product_id}) → "${r.title}" brand=${r.brand ?? "?"} offers=${r.offer_count ?? 0}`;
+        break;
       }
       case "compare_offers": {
         if (!r || !r.product) return null;
@@ -516,38 +558,54 @@ function factLine(name: string, result: unknown, args: Record<string, unknown>):
         const cheapestShop = Array.isArray(r.offers)
           ? r.offers.filter((o: any) => typeof o.price_toman === "number").sort((a: any, b: any) => a.price_toman - b.price_toman)[0]
           : null;
-        return `compare_offers(${r.product.product_id}) → ${s?.offer_count ?? 0} offers, min=${fmtToman(s?.min_price_toman)} max=${fmtToman(s?.max_price_toman)}${cheapestShop ? `; cheapest shop: ${cheapestShop.shop?.name} (${cheapestShop.shop?.shop_id})` : ""}`;
+        line = `compare_offers(${r.product.product_id}) → ${s?.offer_count ?? 0} offers, min=${fmtToman(s?.min_price_toman)} max=${fmtToman(s?.max_price_toman)}${cheapestShop ? `; cheapest shop: ${cheapestShop.shop?.name} (${cheapestShop.shop?.shop_id})` : ""}`;
+        break;
       }
       case "find_shops": {
         if (!r || !Array.isArray(r.shops)) return null;
         const first = r.shops[0];
-        return `find_shops → ${r.total ?? r.shops.length} shops${first ? `; top: ${first.name} (${first.shop_id}, ${first.matching_offers} offers, ${fmtToman(first.best_price_toman)})` : ""}`;
+        line = `find_shops → ${r.total ?? r.shops.length} shops${first ? `; top: ${first.name} (${first.shop_id}, ${first.matching_offers} offers, ${fmtToman(first.best_price_toman)})` : ""}`;
+        break;
       }
       case "find_alternatives": {
         if (!r || !Array.isArray(r.alternatives)) return null;
         const first = r.alternatives[0];
-        return `find_alternatives(${args.product_id ?? ""}) → ${r.alternatives.length} alternatives${first ? `; cheapest: "${first.title}" (${first.product_id}, ${fmtToman(first.min_price_toman)})` : ""}`;
+        line = `find_alternatives(${args.product_id ?? ""}) → ${r.alternatives.length} alternatives${first ? `; cheapest: "${first.title}" (${first.product_id}, ${fmtToman(first.min_price_toman)})` : ""}`;
+        break;
       }
       case "plan_shopping_trip": {
         if (!r || !Array.isArray(r.plan)) return null;
         const total = r.plan.reduce((a: number, p: any) => a + (p.subtotal_toman ?? 0), 0);
-        return `plan_shopping_trip → ${r.plan.length} stops, total≈${fmtToman(total)}`;
+        line = `plan_shopping_trip → ${r.plan.length} stops, total≈${fmtToman(total)}`;
+        break;
       }
       case "check_shop_hours": {
         if (!r || !r.shop_id) return null;
-        return `check_shop_hours(${r.shop_id}, ${r.day}) → open_now=${r.open_now} hours=${r.hours ?? "?"}`;
+        // NOTE: r.hours is the FULL weekly JSON blob (easily >600 chars) — never
+        // inline it; a fact line must stay compact or the NEXT request 400s
+        // on the Zod facts.<=600 cap. Today's hours are the useful memory.
+        const th = r.today_hours;
+        const today = th ? ` ${th.open}-${th.close}` : "";
+        line = `check_shop_hours(${r.shop_id}, ${r.day}) → open_now=${r.open_now}${today}`;
+        break;
       }
       case "prepare_seller_inquiry": {
         if (!r || !r.shop) return null;
-        return `prepare_seller_inquiry(${r.shop.shop_id}, ${r.product?.product_id ?? "?"}) → message drafted`;
+        line = `prepare_seller_inquiry(${r.shop.shop_id}, ${r.product?.product_id ?? "?"}) → message drafted`;
+        break;
       }
       case "record_seller_confirmation": {
         if (!r || !r.record) return null;
-        return `record_seller_confirmation(${r.record.shop_id}, ${r.record.product_id}) → ${r.record.status}`;
+        line = `record_seller_confirmation(${r.record.shop_id}, ${r.record.product_id}) → ${r.record.status}`;
+        break;
       }
       default:
-        return null;
+        line = null;
     }
+    // Hard cap: fact lines are memory hints replayed by the client on the
+    // next turn (Zod caps them at 600) — never let one grow unbounded.
+    if (line && line.length > 500) line = line.slice(0, 500);
+    return line;
   } catch {
     return null;
   }
@@ -569,7 +627,7 @@ function buildSuggestions(steps: AgentStep[], session: ShoppingSession): Suggest
   if (lastSearch && !has("compare_offers")) {
     out.push({
       label: "مقایسه قیمت فروشگاه‌ها",
-      message: "برای بهترین گزینه‌ای که پیدا کردی، پیشنهاد قیمت فروشگاه‌ها را مقایسه کن",
+      message: "برای بهترین گزینه‌ای که پیدا کردید، پیشنهاد قیمت فروشگاه‌ها را مقایسه کن",
     });
   }
   if ((lastSearch || lastCompare) && !has("find_alternatives")) {
@@ -589,14 +647,20 @@ function buildSuggestions(steps: AgentStep[], session: ShoppingSession): Suggest
     out.push({ label: "نزدیک‌ترین فروشگاه", message: "نزدیک‌ترین فروشگاه برای خریدش کجاست؟" });
   }
 
-  // Trip planner: only when ≥2 distinct products were surfaced this turn.
+  // Trip planner: only when ≥2 DISTINCT product categories were surfaced this
+  // turn (a single "cheapest mouse" answer listing 5 mice is one shopping
+  // decision, not a multi-stop trip).
   const ids = new Set<string>();
+  const categories = new Set<string>();
   for (const s of steps) {
     const obs = s.observation as any;
     const list = Array.isArray(obs?.items) ? obs.items : Array.isArray(obs?.alternatives) ? obs.alternatives : [];
-    for (const it of list) if (it?.product_id) ids.add(it.product_id);
+    for (const it of list) {
+      if (it?.product_id) ids.add(it.product_id);
+      if (typeof it?.category === "string" && it.category) categories.add(it.category);
+    }
   }
-  if (ids.size >= 2 && !has("plan_shopping_trip")) {
+  if (ids.size >= 2 && categories.size >= 2 && !has("plan_shopping_trip")) {
     out.push({
       label: "برنامه سفر خرید",
       message: "برای خرید حضوری این محصولات، برنامه سفر خرید بچین",
@@ -612,13 +676,35 @@ function buildSuggestions(steps: AgentStep[], session: ShoppingSession): Suggest
 /* ------------------------------------------------------------------ */
 
 const PRODUCT_KEYWORDS = [
-  "ماوس", "کیبورد", "لپ‌تاپ", "هدفون", "هدست", "موبایل", "دوربین", "تلویزیون",
-  "یخچال", "ماشین لباسشویی", "جاروبرقی", "کفش", "کتونی", "پاور بانک", "پاوربانک",
-  "شارژر", "کابل", "رم", "هارد", "مودم", "تبلت", "ساعت هوشمند", "اسپیکر", "پنکه",
+  "ماوس", "کیبورد", "لپ‌تاپ", "لپتاپ", "هدفون", "هندزفری", "هدست", "موبایل", "گوشی",
+  "دوربین", "تلویزیون", "یخچال", "ماشین لباسشویی", "جاروبرقی", "کفش", "کتونی",
+  "پاور بانک", "پاوربانک", "شارژر", "کابل", "رم", "هارد", "مودم", "تبلت",
+  "ساعت هوشمند", "اسپیکر", "پنکه", "مانیتور", "پرینتر", "کنسول", "پلی استیشن",
 ];
 
 const USE_VALUES = ["university", "walking", "running", "everyday", "mixed", "office", "gaming", "programming", "calls", "music", "work"];
 // PRIORITY_VALUES is declared once, next to the Zod schemas above.
+
+/** Does the message mention a product keyword? Short keywords (≤3 chars,
+ *  like «رم») require whole-TOKEN equality — «بخرم» contains the substring «رم»
+ *  but must NOT trigger a RAM search. Longer keywords use substring matching. */
+function mentionsProductKeyword(message: string): string | null {
+  const norm = normalizeText(message);
+  const tokens = norm.split(/\s+/).filter(Boolean);
+  for (const k of PRODUCT_KEYWORDS) {
+    if (k.length <= 3) {
+      if (tokens.includes(k)) return k;
+    } else if (message.includes(k) || norm.includes(k)) {
+      return k;
+    }
+  }
+  return null;
+}
+
+/** Bare greetings / thanks / bye — no shopping intent at all. */
+const GREETING_RE = /^(سلام|سلام عليكم|درود|هي|hi|hello|salam|سلامم+|صبح بخیر|شب بخیر|خوبی|خوب هستی)[!؟?.،\s]*$/i;
+const THANKS_RE = /^(ممنون|مرسی|با تشکر|دمت گرم|توضیع خدمتتون|مرسی از راهنمایی)[!؟?.،\s]*$/i;
+const BYE_RE = /^(خداحافظ|خداحفظی|بای|بای بای|فعلاً?|خدانگهدار)[!؟?.،\s]*$/i;
 
 function toUnitMult(unit: string | undefined): number {
   if (unit === "میلیارد") return 1_000_000_000;
@@ -630,10 +716,13 @@ function toUnitMult(unit: string | undefined): number {
 /** Cheap keyword/regex intent extraction that runs before the LLM. Only
  *  matches budgets when a unit or budget keyword is present (the old version
  *  matched bare numbers like «لپ‌تاپ i7» → 7 toman budget). */
-function preExtract(message: string, session: ShoppingSession): ShoppingSession {
+function preExtract(message: string, session: ShoppingSession, history: Msg[]): ShoppingSession {
   const norm = message
     .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
-    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+    // thousands separators (fa-IR "۱٬۰۰۰٬۰۰۰" uses U+066C; also plain commas
+    // between digit groups) so the toman regexes can see the full number
+    .replace(/(\d)[٬٬,](?=\d{3}(?!\d))/g, "$1");
 
   // 1) Budget ranges with units: «بین ۲ تا ۴ میلیون»
   const rangeUnits = norm.match(/بین\s*(\d+(?:[.,]\d+)?)\s*(?:تا|و|-)\s*(\d+(?:[.,]\d+)?)\s*(میلیارد|میلیون|هزار)/);
@@ -680,12 +769,10 @@ function preExtract(message: string, session: ShoppingSession): ShoppingSession 
     }
   }
 
-  // Product keyword
-  for (const kw of PRODUCT_KEYWORDS) {
-    if (message.includes(kw)) {
-      session = updateSession(session, { productQuery: kw, category: kw });
-      break;
-    }
+  // Product keyword (token-aware: «بخرم» must not match the RAM keyword «رم»)
+  const kw = mentionsProductKeyword(message);
+  if (kw) {
+    session = updateSession(session, { productQuery: kw, category: kw });
   }
 
   // Installment
@@ -725,6 +812,42 @@ function preExtract(message: string, session: ShoppingSession): ShoppingSession 
         session = updateSession(session, { answersGiven: [...new Set([...session.answersGiven, key])] });
         break;
       }
+    }
+  }
+
+  // Bare number answering a pending budget question («۲» after «بودجه چند؟»).
+  // Colloquial convention: 1–99 = N میلیون تومان, 100–999 = N هزار تومان,
+  // ≥1000 = raw toman. Only applied when a budget question is actually pending
+  // (last assistant message asked about budget, or budget is the next open slot).
+  const bareNum = norm.trim().match(/^\d{1,7}$/);
+  if (bareNum && !session.answersGiven.includes("budget")) {
+    const lastAssistant = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+    const budgetAsked = /بودجه|قیمت|میلیون|هزار|تومن|تومان/.test(lastAssistant) || session.productQuery !== null || session.category !== null;
+    if (budgetAsked) {
+      const v = parseInt(bareNum[0], 10);
+      const scaled = v >= 1 && v <= 99 ? v * 1_000_000 : v >= 100 && v <= 999 ? v * 1_000 : v;
+      if (scaled >= 10_000) {
+        session = updateSession(session, {
+          budgetMax: scaled,
+          answersGiven: [...new Set([...session.answersGiven, "budget"])],
+        });
+      }
+    }
+  }
+
+  // Generative-UI structured answers for the installment question — only BARE
+  // answers (the generative card sends exactly "yes"/"no"); «بله یه هدفون
+  // می‌خواهم» inside a longer message must NOT flip installmentOnly.
+  const bare = norm.trim().toLowerCase();
+  const bareMsg = message.trim();
+  if (bare === "yes" || bareMsg === "بله" || bareMsg === "بله فقط قسطی") {
+    session = updateSession(session, {
+      installmentOnly: true,
+      answersGiven: [...new Set([...session.answersGiven, "installment"])],
+    });
+  } else if (bare === "no" || bareMsg === "خیر" || bareMsg === "فرقی نداره") {
+    if (!session.answersGiven.includes("installment")) {
+      session = updateSession(session, { answersGiven: [...new Set([...session.answersGiven, "installment"])] });
     }
   }
 
@@ -772,18 +895,24 @@ const STOPWORDS = new Set([
   "می", "داره", "دارن", "باشه", "بود", "است", "هست", "کجا", "بخرم", "خرید", "خریدن",
   "زیر", "حدود", "تومان", "میلیون", "میلیارد", "هزار", "ارزون", "ارزان", "ترین",
   "بهترین", "گران", "قیمت", "چند", "برام", "من", "شما", "لطفا", "ممنون",
+  // follow-up question words — pronoun references like «نزدیک‌ترین فروشگاهش کجاست؟»
+  // must relax down to the session's remembered productQuery, not search garbage
+  "نزدیک", "نزدیکترین", "فروشگاه", "فروشگاهش", "فروشگاهها", "کجاست", "کجاست؟", "چیست",
+  "چه", "کدام", "دومی", "اولی", "همون", "همونی", "الان", "دیگه", "باز", "کنید", "کنید",
+  "میخواد", "می‌خواد", "میکنی", "می‌کنی", "میتونی", "می‌تونی", "باشه؟", "خب", "دمت",
 ]);
 
 /** Progressive query relaxation for the deterministic fallback: try the
- *  cleaned full query first, then keyword+connectivity, then keyword only. */
-function fallbackQueryCandidates(message: string): string[] {
+ *  cleaned full query first, then keyword+connectivity, then keyword only,
+ *  then finally the remembered session query (follow-up turns). */
+function fallbackQueryCandidates(message: string, session: ShoppingSession): string[] {
   const cleaned = normalizeText(message)
     .split(/\s+/)
     .filter((t) => t.length > 1 && !STOPWORDS.has(t) && !/^\d+$/.test(t));
   const candidates: string[] = [];
   if (cleaned.length) candidates.push(cleaned.join(" "));
 
-  const kw = PRODUCT_KEYWORDS.find((k) => message.includes(k));
+  const kw = mentionsProductKeyword(message);
   if (kw) {
     const norm = normalizeText(message);
     const hasWireless = /بی\s*سیم|وایرلس|wireless/i.test(norm);
@@ -792,17 +921,213 @@ function fallbackQueryCandidates(message: string): string[] {
     else if (hasWired) candidates.push(`${kw} با سیم`);
     candidates.push(kw);
   }
+
+  // Follow-up turns (pronoun references): relax to the remembered query.
+  if (session.productQuery) candidates.push(session.productQuery);
+  else if (session.category) candidates.push(session.category);
   return [...new Set(candidates)];
 }
 
-function deterministicFallback(message: string, session: ShoppingSession): {
+/** Last regex capture across the replayed fact lines (cross-turn memory). */
+function lastFactCapture(facts: string[], re: RegExp): string | null {
+  for (let i = facts.length - 1; i >= 0; i--) {
+    const m = facts[i].match(re);
+    if (m?.[1]) return m[1];
+  }
+  return null;
+}
+
+function deterministicFallback(message: string, session: ShoppingSession, facts: string[] = []): {
   steps: AgentStep[];
   payload: AgentResponseBody;
 } {
   const parsed = parseQuery(message);
   const steps: AgentStep[] = [];
 
-  const candidates = fallbackQueryCandidates(message);
+  /* ---- Follow-up turns without the LLM: reuse product/shop ids from the
+   *      fact lines the client replays (cross-turn memory). «نزدیک‌ترین
+   *      فروشگاهش کجاست؟» → compare_offers on the last product; «ساعت کاری»
+   *      → check_shop_hours on the last shop. ---- */
+  const normMsg = normalizeText(message);
+  const hasProductKeyword = mentionsProductKeyword(message) !== null;
+  const isFollowUp =
+    !hasProductKeyword && facts.length > 0 &&
+    /نزدیک|فروشگاه|کجا|قیمت|چند|ساعت|باز|بسته|خریدم|همون|دومی|پیشنهاد|مقایسه|جایگزین|ارزان|ارزون/.test(normMsg);
+
+  if (isFollowUp) {
+    try {
+      const tools = getTools();
+      // last product surfaced (search/alternatives/compare facts), last shop
+      const lastProductId =
+        lastFactCapture(facts, /cheapest: "[^"]+" \((product_[A-Za-z0-9]+)/) ??
+        lastFactCapture(facts, /compare_offers\((product_[A-Za-z0-9]+)/) ??
+        lastFactCapture(facts, /find_alternatives\((product_[A-Za-z0-9]+)/);
+      const lastShopId =
+        lastFactCapture(facts, /shop: [^(]+ \((shop_[A-Za-z0-9]+)/) ??
+        lastFactCapture(facts, /check_shop_hours\((shop_[A-Za-z0-9]+)/);
+
+      if (lastProductId) {
+        // «جایگزین / ارزان‌تر» → find_alternatives on the remembered product
+        // (much better than a generic category search).
+        if (/جایگزین|ارزان|ارزون/.test(normMsg)) {
+          const alt = tools.findAlternatives(lastProductId, session.budgetMax ?? null, 8);
+          const alternatives = (alt as any)?.alternatives ?? [];
+          if (alternatives.length) {
+            steps.push({
+              index: 0,
+              tool: "find_alternatives",
+              label: TOOL_LABELS["find_alternatives"] ?? "یافتن جایگزین‌ها",
+              thinking: "یافتن جایگزین‌های ارزان‌تر محصول قبلاً معرفی‌شده (حالت بدون هوش مصنوعی)",
+              args: { product_id: lastProductId, budget: session.budgetMax },
+              observation: compactResult("find_alternatives", alt),
+              status: "ok",
+              fact: factLine("find_alternatives", alt, { product_id: lastProductId }),
+            });
+            const list = alternatives
+              .slice(0, 3)
+              .map((a: any) => `— «${a.title}»${typeof a.min_price_toman === "number" ? ` با قیمت ${a.min_price_toman.toLocaleString("fa-IR")} تومان` : ""}`)
+              .join("\n");
+            return {
+              steps,
+              payload: {
+                reply: `جایگزین‌های ارزان‌تر (هم‌دستهٔ محصول قبلاً معرفی‌شده):\n${list}\nقیمت‌ها از دیتاست است و ممکن است قدیمی باشد.`,
+                steps,
+                tool: "find_alternatives",
+                tool_args: { product_id: lastProductId },
+                tool_result: alt,
+                tool_error: null,
+                generative: null,
+                session,
+                suggestions: [],
+                fallback: true,
+              },
+            };
+          }
+        }
+        const wantsHours = /ساعت|باز|بسته/.test(normMsg) && lastShopId;
+        if (wantsHours && lastShopId) {
+          const shopName = lastFactCapture(facts, /cheapest shop: (.+?) \(shop_/) ?? "فروشگاه";
+          const hours = tools.checkShopHours(lastShopId);
+          const th = (hours as any)?.today_hours;
+          steps.push({
+            index: 0,
+            tool: "check_shop_hours",
+            label: TOOL_LABELS["check_shop_hours"] ?? "بررسی ساعت کاری",
+            thinking: "بررسی ساعت کاری فروشگاه قبلاً معرفی‌شده (حالت بدون هوش مصنوعی)",
+            args: { shop_id: lastShopId },
+            observation: hours,
+            status: "ok",
+            fact: factLine("check_shop_hours", hours, { shop_id: lastShopId }),
+          });
+          const reply = (hours as any)?.open_now === true
+            ? `فروشگاه ${shopName} الان باز است — تا ساعت ${toPersianDigits(th?.close ?? "?")} (طبق دادهٔ ثبت‌شده).`
+            : (hours as any)?.open_now === false
+              ? `فروشگاه ${shopName} الان بسته است — از ساعت ${toPersianDigits(th?.open ?? "?")} باز می‌شود (طبق دادهٔ ثبت‌شده).`
+              : "ساعت کاری دقیق در داده‌ها ثبت نشده؛ قبل از مراجعه تلفنی تأیید کنید.";
+          return { steps, payload: { reply, steps, tool: "check_shop_hours", tool_args: { shop_id: lastShopId }, tool_result: hours, tool_error: null, generative: null, session, suggestions: [], fallback: true } };
+        }
+        // nearest-shop / price question → compare offers on the remembered product
+        const near = session.neighborhood ? resolveLocation(session.neighborhood) : null;
+        const cmp = tools.compareOffers(lastProductId, { near: near ?? undefined, sort: near ? "distance" : "price_asc", limit: 6 } as Filters);
+        steps.push({
+          index: 0,
+          tool: "compare_offers",
+          label: TOOL_LABELS["compare_offers"] ?? "مقایسهٔ پیشنهادها",
+          thinking: "مقایسهٔ پیشنهادهای محصول قبلاً معرفی‌شده (حالت بدون هوش مصنوعی)",
+          args: { product_id: lastProductId },
+          observation: compactResult("compare_offers", cmp),
+          status: "ok",
+          fact: factLine("compare_offers", cmp, { product_id: lastProductId }),
+        });
+        const offers = (cmp as any)?.offers ?? [];
+        if (offers.length) {
+          const top = offers
+            .filter((o: any) => typeof o.price_toman === "number")
+            .slice(0, 3)
+            .map((o: any) => `— ${o.shop?.name ?? "فروشگاه"}${o.shop?.location_label ? ` (${o.shop.location_label})` : ""}: ${(o.price_toman as number).toLocaleString("fa-IR")} تومان`)
+            .join("\n");
+          return {
+            steps,
+            payload: {
+              reply: `پیشنهادهای ثبت‌شده برای «${(cmp as any)?.product?.title ?? "محصول قبلی"}»:\n${top || "— پیشنهادی با قیمت ثبت‌شده نیست."}\nقیمت‌ها از دیتاست است و ممکن است قدیمی باشد؛ قبل از مراجعه تماس بگیرید.`,
+              steps,
+              tool: "compare_offers",
+              tool_args: { product_id: lastProductId },
+              tool_result: cmp,
+              tool_error: null,
+              generative: null,
+              session,
+              suggestions: [],
+              fallback: true,
+            },
+          };
+        }
+      }
+    } catch {
+      // fall through to the plain search path below
+    }
+  }
+
+  const candidates = fallbackQueryCandidates(message, session);
+
+  // Greeting / thanks / bye with no shopping intent → friendly canned reply
+  // (never run a product search for «سلام» — it surfaced «چسب اتوکلاو سلامت…»).
+  if (!mentionsProductKeyword(message)) {
+    const normTrim = normalizeText(message).trim();
+    if (GREETING_RE.test(normTrim)) {
+      return {
+        steps,
+        payload: {
+          reply:
+            "سلام و خوش‌آمدی! من ترب‌گرد هستم — دستیار خرید حضوری تهران. مثلاً بنویسید: «ارزون‌ترین ماوس بی‌سیم زیر ۱ میلیون» یا «فروشگاه موبایل نزدیک صادقیه که قسطی داره» تا برایتان جست‌وجو و مقایسه کنم.",
+          steps,
+          tool: null,
+          tool_args: null,
+          tool_result: null,
+          tool_error: null,
+          generative: null,
+          session,
+          suggestions: [],
+          fallback: true,
+        },
+      };
+    }
+    if (THANKS_RE.test(normTrim)) {
+      return {
+        steps,
+        payload: {
+          reply:
+            "خواهش می‌کنم! اگر چیز دیگری لازم داشتید — جست‌وجوی محصول، مقایسهٔ قیمت فروشگاه‌ها، برنامهٔ سفر خرید — در خدمت شما هستم.",
+          steps,
+          tool: null,
+          tool_args: null,
+          tool_result: null,
+          tool_error: null,
+          generative: null,
+          session,
+          suggestions: [],
+          fallback: true,
+        },
+      };
+    }
+    if (BYE_RE.test(normTrim)) {
+      return {
+        steps,
+        payload: {
+          reply: "خدانگهدار! هر وقت خرید جدیدی در ذهن داشتید، اینجا هستم. خرید خوبی داشته باشید!",
+          steps,
+          tool: null,
+          tool_args: null,
+          tool_result: null,
+          tool_error: null,
+          generative: null,
+          session,
+          suggestions: [],
+          fallback: true,
+        },
+      };
+    }
+  }
   if (!candidates.length) {
     return {
       steps,
@@ -827,8 +1152,11 @@ function deterministicFallback(message: string, session: ShoppingSession): {
     const filters = sessionToFilters(session);
 
     // Progressive relaxation: try the most specific candidate first; on
-    // 0 results relax (drop budget → shorter query) so the user still
-    // gets real products instead of an empty answer.
+    // 0 results relax (drop budget → shorter query → remembered session
+    // query) so the user still gets real products instead of an empty answer.
+    // «ارزان/ارزون» requests sort by price so the cheapest really surfaces.
+    const wantsCheapest = /ارزان|ارزون/i.test(normalizeText(message));
+    const fallbackSort: Filters["sort"] = wantsCheapest ? "price_asc" : ((filters.sort as Filters["sort"]) || "relevance");
     let result: ReturnType<typeof tools.searchProducts> | null = null;
     let usedQuery = candidates[0];
 
@@ -839,7 +1167,7 @@ function deterministicFallback(message: string, session: ShoppingSession): {
         min_price: parsedCand.minBudget ?? parsed.minBudget ?? filters.min_price ?? null,
         near: filters.near ? resolveLocation(filters.near) : null,
         installment_only: filters.installment_only,
-        sort: (filters.sort as Filters["sort"]) || "relevance",
+        sort: fallbackSort,
         limit: 12,
       };
       const r = tools.searchProducts(cand, f);
@@ -882,8 +1210,14 @@ function deterministicFallback(message: string, session: ShoppingSession): {
 
     const count = result0.total;
     const cheapest = result0.items.find((i) => i.min_price_toman !== null);
+    const usedMemory = candidates.length > 1 && query === candidates[candidates.length - 1] && !!session.productQuery;
+    const cheapestLine = cheapest && cheapest.min_price_toman !== null
+      ? ` — ارزان‌ترین: «${cheapest.title}» با قیمت ${cheapest.min_price_toman.toLocaleString("fa-IR")} تومان`
+      : "";
     const reply = count > 0
-      ? `${count.toLocaleString("fa-IR")} محصول پیدا شد${cheapest && cheapest.min_price_toman !== null ? ` — ارزان‌ترین: «${cheapest.title}» با قیمت ${cheapest.min_price_toman.toLocaleString("fa-IR")} تومان.` : ""}. برای مقایسهٔ فروشگاه‌ها روی کارت‌ها بزن یا دوباره بپرس.`
+      ? usedMemory
+        ? `${count.toLocaleString("fa-IR")} محصول برای «${query}» (از حافظهٔ گفتگو) پیدا شد${cheapestLine}. برای مقایسهٔ فروشگاه‌ها روی کارت‌ها بزن یا دوباره بپرس.`
+        : `${count.toLocaleString("fa-IR")} محصول پیدا شد${cheapestLine}. برای مقایسهٔ فروشگاه‌ها روی کارت‌ها بزن یا دوباره بپرس.`
       : "نتیجه‌ای پیدا نشد — عبارت را کلیک‌تر یا بدون فیلتر امتحان کن.";
 
     return {
@@ -947,6 +1281,23 @@ export async function POST(req: Request) {
     );
   }
 
+  // Tolerance: drop empty/whitespace history entries before strict validation —
+  // a client recovering from an interrupted stream may replay an empty bubble,
+  // and that must never 400 the whole turn.
+  if (body && Array.isArray(body.history)) {
+    body.history = body.history.filter(
+      (m: unknown) => m && typeof m === "object" && typeof (m as any).content === "string" && (m as any).content.trim().length > 0
+    );
+  }
+  // Tolerance: truncate over-long fact lines (client accumulates raw tool
+  // memory; a bulky fact must never 400 the next turn).
+  if (body && Array.isArray(body.facts)) {
+    body.facts = body.facts
+      .filter((f: unknown) => typeof f === "string" && f.trim().length > 0)
+      .map((f: string) => (f.length > 600 ? f.slice(0, 600) : f))
+      .slice(-10);
+  }
+
   // Validate the full request body with Zod (strict: no unknown fields).
   const validated = agentRequestSchema.safeParse(body);
   if (!validated.success) {
@@ -954,6 +1305,7 @@ export async function POST(req: Request) {
     const msg = firstIssue
       ? `${firstIssue.path.join(".") || "body"}: ${firstIssue.message}`
       : "validation error";
+    console.warn(`[agent 400] ${msg}`);
     return NextResponse.json(
       { error: msg, code: "validation_error" },
       { status: 400 }
@@ -975,7 +1327,7 @@ export async function POST(req: Request) {
   let session: ShoppingSession = sessionFromValidated(validated.data.session);
 
   // Cheap pre-extraction, then the LLM "remember" patches refine/override it.
-  session = preExtract(question, session);
+  session = preExtract(question, session, history);
 
   // Moderation: detect profanity so the loop can (a) show the model a cleaned
   // message (it must never mirror slurs) and (b) remind it to stay polite.
@@ -984,6 +1336,27 @@ export async function POST(req: Request) {
   const safeHistory: Msg[] = history.map((m) => ({ role: m.role, content: sanitizeForModel(m.content) }));
 
   /* ------------------ streaming orchestration ------------------ */
+
+  /** Attach the deterministic generative card ONLY when its topic actually
+   *  matches what the model asked about — otherwise the bubble asks about use
+   *  while the card below answers budget (mismatch = confusing double question). */
+  function matchingGenerative(session: ShoppingSession, asked: string): GenerativePayload | null {
+    const q = nextQuestion(session);
+    if (!q) return null;
+    const a = asked.replace(/\u200c/g, " ");
+    switch (q.key) {
+      case "budget":
+        return /بودجه|قیمت|چقدر|میلیون|هزار|تومن|تومان/.test(a) ? q.payload : null;
+      case "use":
+        return /کار|استفاده|برای چی|موقعیت|هدف/.test(a) ? q.payload : null;
+      case "priority":
+        return /مهم|اولویت|ترجیح|بهتر/.test(a) ? q.payload : null;
+      case "installment":
+        return /قسط|اقساط/.test(a) ? q.payload : null;
+      default:
+        return null;
+    }
+  }
 
   const runAgent = async (send: (ev: unknown) => void): Promise<AgentResponseBody> => {
     const steps: AgentStep[] = [];
@@ -1037,7 +1410,7 @@ export async function POST(req: Request) {
             index: stepIndex++,
             tool: "ask_user",
             label: TOOL_LABELS["ask_user"] ?? "پرسش از کاربر",
-            thinking: parsed.thinking ? sanitizeText(parsed.thinking) : null,
+            thinking: parsed.thinking ? sanitizeText(cleanThinking(parsed.thinking)) : null,
             args: { question: cleanQuestion, why: action.why ? sanitizeText(action.why) : null },
             observation: null,
             status: "ok",
@@ -1045,7 +1418,7 @@ export async function POST(req: Request) {
           steps.push(step);
           send({ type: "step", step });
           reply = cleanQuestion;
-          generative = nextQuestion(session)?.payload ?? null;
+          generative = matchingGenerative(session, cleanQuestion);
           break;
         }
 
@@ -1062,7 +1435,7 @@ export async function POST(req: Request) {
           index: stepIndex++,
           tool: action.name,
           label: TOOL_LABELS[action.name] ?? action.name,
-          thinking: parsed.thinking ? sanitizeText(parsed.thinking) : null,
+          thinking: parsed.thinking ? sanitizeText(cleanThinking(parsed.thinking)) : null,
           args: action.args,
           observation: compact,
           status: error ? "error" : "ok",
@@ -1114,9 +1487,81 @@ export async function POST(req: Request) {
         suggestions: buildSuggestions(steps, session),
       } satisfies AgentResponseBody;
     } catch {
-      // LLM unavailable — deterministic fallback (never fabricates data).
-      const fb = deterministicFallback(question, session);
-      for (const s of fb.steps) send({ type: "step", s });
+      // LLM unavailable mid-loop. Salvage whatever already executed:
+      //   1. a data-bearing tool result → compose a grounded reply (keep steps)
+      //   2. a check_shop_hours result → compose the hours answer (keep steps)
+      //   3. otherwise → facts-aware deterministic fallback (cross-turn memory)
+      const dataEntry = [...rawResults].reverse().find((r) => {
+        const res = r.result as any;
+        return (
+          (Array.isArray(res?.items) && res.items.length > 0) ||
+          (Array.isArray(res?.offers) && res.offers.length > 0) ||
+          (Array.isArray(res?.shops) && res.shops.length > 0) ||
+          (Array.isArray(res?.alternatives) && res.alternatives.length > 0)
+        );
+      });
+      if (steps.length && dataEntry) {
+        let composed = "ارتباط با هستهٔ هوش مصنوعی قطع شد، ولی نتایجی که تا اینجا گرفتم معتبر است:";
+        const r = dataEntry.result as any;
+        if (Array.isArray(r?.items) && r.items.length) {
+          const best = r.items.find((i: any) => typeof i.min_price_toman === "number");
+          composed += best
+            ? `\n— ارزان‌ترین «${best.title}» با قیمت ${(best.min_price_toman as number).toLocaleString("fa-IR")} تومان (${best.offer_count} پیشنهاد).`
+            : `\n— ${r.total ?? r.items.length} نتیجهٔ دیگر در کارت‌های زیر.`;
+        } else if (Array.isArray(r?.offers) && r.offers.length) {
+          const withPrice = r.offers.filter((o: any) => typeof o.price_toman === "number");
+          const cheapest = [...withPrice].sort((a: any, b: any) => a.price_toman - b.price_toman)[0];
+          composed += cheapest
+            ? `\n— ارزان‌ترین پیشنهاد: ${(cheapest.price_toman as number).toLocaleString("fa-IR")} تومان در «${cheapest.shop?.name ?? "فروشگاه"}».`
+            : "\n— پیشنهادها در کارت‌های زیر.";
+        } else if (Array.isArray(r?.shops) && r.shops.length) {
+          composed += `\n— ${r.shops.length} فروشگاه مطابق در کارت‌های زیر.`;
+        } else if (Array.isArray(r?.alternatives) && r.alternatives.length) {
+          const first = r.alternatives[0];
+          composed += first
+            ? `\n— جایگزین ارزان‌تر: «${first.title}»${typeof first.min_price_toman === "number" ? ` با قیمت ${first.min_price_toman.toLocaleString("fa-IR")} تومان` : ""}.`
+            : "\n— جایگزین‌ها در کارت‌های زیر.";
+        }
+        composed += "\nلطفاً چند لحظه بعد دوباره بپرس تا تحلیل کامل شود.";
+        return {
+          reply: sanitizeText(composed),
+          steps,
+          tool: dataEntry.tool,
+          tool_args: dataEntry.args,
+          tool_result: dataEntry.result,
+          tool_error: null,
+          generative: null,
+          session,
+          suggestions: buildSuggestions(steps, session),
+        } satisfies AgentResponseBody;
+      }
+      // A check_shop_hours step already ran before the failure → answer from it.
+      const hoursStep = [...steps].reverse().find((s) => s.tool === "check_shop_hours" && s.status === "ok");
+      if (hoursStep) {
+        const h = hoursStep.observation as any;
+        const th = h?.today_hours;
+        const shopName = lastFactCapture(facts, /cheapest shop: (.+?) \(shop_/) ?? "فروشگاه";
+        const line =
+          h?.open_now === true
+            ? `«${shopName}» الان باز است — تا ساعت ${toPersianDigits(th?.close ?? "؟")} (طبق دادهٔ ثبت‌شده).`
+            : h?.open_now === false
+              ? `«${shopName}» الان بسته است — از ساعت ${toPersianDigits(th?.open ?? "؟")} باز می‌شود (طبق دادهٔ ثبت‌شده).`
+              : "ساعت کاری دقیق ثبت نشده؛ قبل از مراجعه تلفنی تأیید کنید.";
+        return {
+          reply: sanitizeText(`ارتباط با هستهٔ هوش مصنوعی قطع شد، ولی نتیجهٔ بررسی معتبر است:\n— ${line}\nلطفاً چند لحظه بعد دوباره بپرس.`),
+          steps,
+          tool: "check_shop_hours",
+          tool_args: hoursStep.args,
+          tool_result: h,
+          tool_error: null,
+          generative: null,
+          session,
+          suggestions: [],
+        } satisfies AgentResponseBody;
+      }
+      // Nothing usable executed — deterministic fallback (never fabricates data).
+      const fb = deterministicFallback(question, session, facts);
+      for (const s of fb.steps) send({ type: "step", step: s });
       return fb.payload;
     }
   };
