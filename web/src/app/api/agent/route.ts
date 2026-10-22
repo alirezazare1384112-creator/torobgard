@@ -182,7 +182,23 @@ function extractAction(text: string): ParsedAction | null {
     if (inStr) {
       if (esc) { esc = false; out.push(c); continue; }
       if (c === "\\") { esc = true; out.push(c); continue; }
-      if (c === '"') { inStr = false; out.push(c); continue; }
+      if (c === '"') {
+        // Is this a REAL closing quote? In valid JSON, a closing quote is
+        // followed (after optional whitespace) by ':', ',', '}' or ']'.
+        // Otherwise the model emitted an unescaped inner quote (a very common
+        // failure, e.g. «دسته محصول "ماوس" و بودجه…») — escape it and keep
+        // the string open so JSON.parse still succeeds.
+        let j = i + 1;
+        while (j < t.length && /\s/.test(t[j])) j++;
+        const next = j < t.length ? t[j] : "";
+        if (next === "" || next === ":" || next === "," || next === "}" || next === "]") {
+          inStr = false;
+          out.push(c);
+          continue;
+        }
+        out.push('\\"');
+        continue;
+      }
       // Escape raw control characters inside strings — models frequently
       // emit literal newlines in "reply" values, breaking JSON.parse.
       if (c === "\n") { out.push("\\n"); continue; }
@@ -602,7 +618,7 @@ const PRODUCT_KEYWORDS = [
 ];
 
 const USE_VALUES = ["university", "walking", "running", "everyday", "mixed", "office", "gaming", "programming", "calls", "music", "work"];
-const PRIORITY_VALUES = ["comfort", "appearance", "durability", "price", "balanced", "precision", "wireless", "mechanical", "quiet", "performance", "portability", "battery", "sound", "noise_cancel"];
+// PRIORITY_VALUES is declared once, next to the Zod schemas above.
 
 function toUnitMult(unit: string | undefined): number {
   if (unit === "میلیارد") return 1_000_000_000;

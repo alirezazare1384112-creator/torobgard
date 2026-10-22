@@ -69,7 +69,6 @@ export async function POST(req: Request) {
     return NextResponse.json(plan);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
     console.error("[api/route] error:", msg);
     return NextResponse.json(
       { error: "internal_error", code: "server_error" },
