@@ -15,6 +15,7 @@ import {
   MapPin,
   Package,
   Phone,
+  Plus,
   Send,
   ShieldCheck,
   Sparkles,
@@ -29,8 +30,11 @@ import { Card } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { useCart } from "./cart-store";
 import { SyntheticNameBadge } from "./disclaimers";
 import { formatDistanceKm, formatToman, toPersianDigits } from "./format";
+import { GenerativeMessage, type GenerativePayload } from "./generative-ui";
+import { createSession, updateSession, type ShoppingSession } from "@/lib/torob/session";
 import type { AgentResponse, SearchItem } from "./types";
 
 /**
@@ -48,6 +52,8 @@ interface ChatMessage {
   toolArgs?: Record<string, unknown> | null;
   toolResult?: unknown;
   toolError?: string | null;
+  generative?: GenerativePayload | null;
+  fallback?: boolean;
 }
 
 const STARTERS = [
@@ -121,7 +127,7 @@ const REFINE_CHIPS = [
   { label: "بازنگری", msg: "ترجیحاتم را عوض کنم" },
 ];
 
-/** A product card in the chat with pick-to-compare + refine chips. */
+/** A product card in the chat with pick-to-compare + add-to-cart + refine chips. */
 function ProductCard({
   p,
   picked,
@@ -135,6 +141,8 @@ function ProductCard({
   onPick: () => void;
   onRefine: (msg: string) => void;
 }) {
+  const inCart = useCart((s) => s.items.some((x) => x.product_id === p.product_id));
+  const addToCart = useCart((s) => s.add);
   return (
     <div className={`rounded-lg border p-2 transition-colors ${picked ? "border-primary bg-primary/5" : "border-border bg-card"}`}>
       <button type="button" onClick={onPick} className="flex w-full items-center gap-2 text-right">
@@ -153,6 +161,16 @@ function ProductCard({
       <div className="mt-1.5 flex flex-wrap items-center gap-1">
         <Button type="button" variant={picked ? "default" : "outline"} size="sm" className="h-7 gap-1 px-2 text-[11px]" onClick={onTogglePick}>
           <GitCompareArrows className="size-3" aria-hidden />{picked ? "در مقایسه" : "مقایسه"}
+        </Button>
+        <Button
+          type="button"
+          variant={inCart ? "secondary" : "outline"}
+          size="sm"
+          className="h-7 gap-1 px-2 text-[11px]"
+          disabled={inCart}
+          onClick={() => addToCart(p)}
+        >
+          {inCart ? <><Check className="size-3" aria-hidden />اضافه شد</> : <><Plus className="size-3" aria-hidden />برنامهٔ خرید</>}
         </Button>
         {REFINE_CHIPS.map((c) => (
           <button key={c.label} type="button" onClick={() => onRefine(c.msg)} className="rounded-full border border-border bg-card px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
@@ -264,6 +282,8 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
   // products picked for side-by-side comparison (from chat result cards)
   const [picked, setPicked] = React.useState<Record<string, SearchItem>>({});
   const [compareOpen, setCompareOpen] = React.useState(false);
+  // structured session state (persisted across turns)
+  const [session, setSession] = React.useState<ShoppingSession | null>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -278,12 +298,33 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
     setInput("");
     setLoading(true);
     try {
-      const r = await fetch("/api/agent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: trimmed, history }) });
+      const r = await fetch("/api/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: trimmed, history, session }),
+      });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = (await r.json()) as AgentResponse;
-      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", text: j.reply || (j.error ? `خطا: ${j.error}` : "پاسخی دریافت نشد."), tool: j.tool ?? null, toolArgs: j.tool_args ?? null, toolResult: j.tool_result ?? null, toolError: j.tool_error ?? null }]);
+      const j = await r.json() as any;
+      if (j.session) setSession(j.session);
+      setMessages((m) => [
+        ...m,
+        {
+          id: `a-${Date.now()}`,
+          role: "assistant",
+          text: j.reply || (j.error ? `خطا: ${j.error}` : "پاسخی دریافت نشد."),
+          tool: j.tool ?? null,
+          toolArgs: j.tool_args ?? null,
+          toolResult: j.tool_result ?? null,
+          toolError: j.tool_error ?? null,
+          generative: j.generative ?? null,
+          fallback: j.fallback ?? false,
+        },
+      ]);
     } catch (e) {
-      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", text: `خطا در ارتباط با دستیار: ${e instanceof Error ? e.message : String(e)}` }]);
+      setMessages((m) => [
+        ...m,
+        { id: `a-${Date.now()}`, role: "assistant", text: `خطا در ارتباط با دستیار: ${e instanceof Error ? e.message : String(e)}` },
+      ]);
     } finally {
       setLoading(false);
     }
@@ -364,6 +405,26 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
                 )}
 
                 {m.role === "assistant" && <ToolCard msg={m} />}
+
+                {/* Generative UI: structured question/budget/preference cards */}
+                {m.role === "assistant" && m.generative && (
+                  <div className="w-full max-w-[94%]">
+                    <GenerativeMessage
+                      payload={m.generative}
+                      onAnswer={(answer) => {
+                        // Convert the structured answer into a chat message
+                        if (Array.isArray(answer)) {
+                          send(answer.join("، "));
+                        } else if (typeof answer === "object" && "min" in answer) {
+                          send(`بودجه از ${answer.min.toLocaleString("fa-IR")} تا ${answer.max.toLocaleString("fa-IR")} تومان`);
+                        } else {
+                          send(String(answer));
+                        }
+                      }}
+                      onSkip={() => send("رد شد")}
+                    />
+                  </div>
+                )}
               </motion.div>
             );
           })}

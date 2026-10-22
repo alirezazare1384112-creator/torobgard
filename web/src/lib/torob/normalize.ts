@@ -44,6 +44,10 @@ export function normalizeText(value: string | null | undefined): string {
   let v = "";
   for (const ch of value) v += translateChar(ch);
   v = v.toLowerCase();
+  // Remove comma thousands-separators from numbers BEFORE stripping punctuation,
+  // so "2,000,000" → "2000000" (not "2 000 000"). Only strip commas between
+  // digits, NOT dots (which may be decimal points like "1.5").
+  v = v.replace(/(\d),(?=\d)/g, "$1");
   v = v.replace(/[\u064B-\u065F]/g, ""); // strip Arabic diacritics
   // JS \w is ASCII-only (unlike Python's Unicode \w); use property escapes so
   // Persian letters/digits are preserved while punctuation is dropped.
@@ -136,26 +140,62 @@ export function parseQuery(query: string): ParsedQuery {
   // strip connectivity tokens from the product-terms stream (applied below).
   const stripConn = new Set(["بی", "با", "سیم", "سیمی", "wireless", "wired"]);
 
-  // extract a NUMERIC budget expression like "تا ۱ میلیون", "زیر 2 میلیون",
-  // "حداکثر 500 هزار". The prefix sets the bound direction.
-  const budgetRe = /(زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از)\s+(\d+(?:\.\d+)?)\s*(میلیارد|میلیون|هزار)?/;
-  const bm = norm.match(budgetRe);
+  // Budget parsing — supports:
+  //   "تا ۲ میلیون" / "زیر یک میلیون" / "حداکثر ۳ میلیون"
+  //   "بین ۲ تا ۴ میلیون"
+  //   "1,000,000" / "1.5 میلیون" / "500 هزار"
+  //   Persian digits already normalized to Latin by normalizeText
   let budgetStripped = norm;
-  if (bm) {
-    const n = parseFloat(bm[2]);
-    const mult = MULT[bm[3] ?? ""] ?? 1;
-    const amount = Math.round(n * mult);
-    const prefix = bm[1];
-    if (prefix.includes("بیشتر")) out.minBudget = amount;
-    else out.maxBudget = amount; // زیر/تا/حداکثر/کمتر از -> upper bound
-    budgetStripped = norm.replace(budgetRe, " ");
+
+  // Pattern 1: "بین X تا Y [unit]" → min=X, max=Y
+  const rangeRe = /بین\s+(\d+(?:[,.]\d+)?)\s*(?:تا|-)\s*(\d+(?:[,.]\d+)?)\s*(میلیارد|میلیون|هزار)?/;
+  const rm = norm.match(rangeRe);
+  if (rm) {
+    const mult = MULT[rm[3] ?? ""] ?? 1;
+    const lo = Math.round(parseFloat(rm[1].replace(/,/g, "")) * mult);
+    const hi = Math.round(parseFloat(rm[2].replace(/,/g, "")) * mult);
+    out.minBudget = Math.min(lo, hi);
+    out.maxBudget = Math.max(lo, hi);
+    budgetStripped = norm.replace(rangeRe, " ");
+  } else {
+    // Pattern 2: "prefix X [unit]" — single bound
+    const budgetRe = /(زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از)\s+(\d+(?:[,.]\d+)?)\s*(میلیارد|میلیون|هزار)?/;
+    const bm = norm.match(budgetRe);
+    if (bm) {
+      const n = parseFloat(bm[2].replace(/,/g, ""));
+      const mult = MULT[bm[3] ?? ""] ?? 1;
+      const amount = Math.round(n * mult);
+      const prefix = bm[1];
+      if (prefix.includes("بیشتر")) out.minBudget = amount;
+      else out.maxBudget = amount;
+      budgetStripped = norm.replace(budgetRe, " ");
+    }
+  }
+
+  // Negative filters: "بدون X" / "نه X" — exclude term X from results
+  const negativeRe = /(?:بدون|نه)\s+(\S+)/g;
+  const negatives: string[] = [];
+  let negMatch;
+  while ((negMatch = negativeRe.exec(norm)) !== null) {
+    negatives.push(negMatch[1]);
+  }
+  if (negatives.length > 0) {
+    budgetStripped = budgetStripped.replace(/(?:بدون|نه)\s+\S+/g, " ");
   }
 
   // drop the budget prefix word, currency word, and connectivity tokens
   let termStream = budgetStripped
-    .replace(/(زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از)/g, " ")
-    .replace(/toman/gi, " ");
+    .replace(/(زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از|بین)/g, " ")
+    .replace(/toman|تومان/gi, " ");
   const termTokens = termStream.split(/\s+/).filter((t) => t.length > 1);
   out.terms = termTokens.filter((t) => !stripConn.has(t));
+
+  // Attach negatives as a special field (prefixed with -)
+  for (const neg of negatives) {
+    if (neg.length > 1 && !stripConn.has(neg)) {
+      out.terms.push("-" + neg);
+    }
+  }
+
   return out;
 }

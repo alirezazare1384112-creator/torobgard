@@ -321,8 +321,29 @@ export class ShoppingTools {
     }
     const connClause = connConds.join(" ");
 
-    const where = terms.map(() => "p.title_norm LIKE ?").join(" AND ");
-    const termParams = terms.map((t) => `%${t}%`);
+    // Separate positive terms (must match) from negative terms (must NOT match)
+    const positiveTerms = terms.filter((t) => !t.startsWith("-"));
+    const negativeTerms = terms.filter((t) => t.startsWith("-")).map((t) => t.slice(1));
+
+    if (positiveTerms.length === 0 && negativeTerms.length === 0 && parsed.connectivity === null)
+      return result([], 0, f, "empty_query");
+
+    // Build WHERE clause: all positive terms must match (AND), all negative
+    // terms must NOT match (AND NOT).
+    const whereParts: string[] = [];
+    const termParams: string[] = [];
+    for (const t of positiveTerms) {
+      whereParts.push("p.title_norm LIKE ?");
+      termParams.push(`%${t}%`);
+    }
+    for (const t of negativeTerms) {
+      whereParts.push("p.title_norm NOT LIKE ?");
+      termParams.push(`%${t}%`);
+    }
+    const where = whereParts.join(" AND ");
+
+    // If no positive terms at all (only negatives), use "1=1" as base
+    const whereSql = where || "1=1";
 
     // fold parsed budget into filters (explicit filters take precedence)
     if (f.min_price === null && parsed.minBudget !== null) f.min_price = parsed.minBudget;
@@ -336,7 +357,7 @@ export class ShoppingTools {
     const total = (
       this.db
         .prepare(
-          `SELECT COUNT(*) c FROM products p WHERE ${where} ${connClause} ${offerClause}`
+          `SELECT COUNT(*) c FROM products p WHERE ${whereSql} ${connClause} ${offerClause}`
         )
         .get(...termParams, ...connParams, ...offerParams) as any
     ).c;
@@ -379,7 +400,7 @@ export class ShoppingTools {
                p.image_urls,
                ${nearSubselect}
         FROM products p
-        WHERE ${where} ${connClause} ${offerClause}
+        WHERE ${whereSql} ${connClause} ${offerClause}
         LIMIT ? OFFSET ?
         `
       )
@@ -465,7 +486,7 @@ export class ShoppingTools {
       );
     }
 
-    const items = sorted.slice(0, f.limit).map(({ item }) => {
+    const items = sorted.slice(f.offset, f.offset + f.limit).map(({ item }) => {
       const { _norm, ...rest } = item;
       return rest;
     });
@@ -790,7 +811,7 @@ export class ShoppingTools {
     const r = this.db
       .prepare("SELECT weekly_hours FROM shops WHERE shop_id = ?")
       .get(shop_id) as { weekly_hours: string | null } | undefined;
-    if (!r) return { status: "not_found", shop_id, day: day ?? todayKey(), hours: null, open_now: null, today_hours: null, full_week: null };
+    if (!r) return { status: "not_found", shop_id, day: day ?? todayKey(), hours: null, open_now: null, today_hours: null, full_week: null, day_info: null };
     const key = (day as DayKey) || todayKey();
     const today = parseTodayHours(r.weekly_hours);
     let fullWeek: Record<string, { status: string; open: string; close: string }> | null = null;
@@ -844,9 +865,9 @@ export class ShoppingTools {
     const shop = this.db
       .prepare("SELECT shop_id, name, contacts FROM shops WHERE shop_id = ?")
       .get(shop_id) as { shop_id: string; name: string; contacts: string | null } | undefined;
-    if (!shop) return { status: "not_found", message: null, questions: [], shop: null, product: null };
+    if (!shop) return { status: "not_found", message: null, questions: [], shop: null, product: null, known_price: null, known_price_changed_at: null };
     const product = this.getProductDetails(product_id);
-    if (!product) return { status: "not_found", message: null, questions: [], shop: null, product: null };
+    if (!product) return { status: "not_found", message: null, questions: [], shop: null, product: null, known_price: null, known_price_changed_at: null };
     // the cheapest known offer for this product at this shop, if any
     const known = this.db
       .prepare(

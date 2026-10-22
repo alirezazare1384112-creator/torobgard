@@ -2,6 +2,15 @@ import { NextResponse } from "next/server";
 import ZAI from "z-ai-web-dev-sdk";
 import { getTools, resolveLocation, type Filters } from "@/lib/torob";
 import { AGENT_SYSTEM_PROMPT, AGENT_SUMMARY_PROMPT } from "@/lib/torob/agent-tools";
+import { parseQuery } from "@/lib/torob/normalize";
+import {
+  createSession,
+  updateSession,
+  nextQuestion,
+  sessionToFilters,
+  type ShoppingSession,
+} from "@/lib/torob/session";
+import type { GenerativePayload } from "@/components/torob/generative-ui";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -11,15 +20,31 @@ interface ToolCall {
   args: Record<string, any>;
 }
 
+/** Extended response: now includes `generative` (a typed UI payload the
+ *  frontend can render as structured questions/cards) and `session`
+ *  (the structured shopping context, persisted client-side). */
+interface AgentResponseBody {
+  reply: string;
+  tool: string | null;
+  tool_args: Record<string, unknown> | null;
+  tool_result: unknown;
+  tool_error: string | null;
+  generative?: GenerativePayload | null;
+  session?: ShoppingSession | null;
+  fallback?: boolean;
+  error?: string;
+  code?: string;
+}
+
 function extractJson(text: string): ToolCall | null {
   if (!text) return null;
-  // grab the first {...} block (tolerate leading/trailing prose)
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end === -1 || end < start) return null;
   try {
     const obj = JSON.parse(text.slice(start, end + 1));
-    if (obj && typeof obj.tool === "string" && typeof obj.args === "object") return obj;
+    if (obj && typeof obj.tool === "string" && typeof obj.args === "object")
+      return obj;
   } catch {
     /* ignore */
   }
@@ -30,7 +55,7 @@ function asFilters(args: Record<string, any>): Filters {
   const nearText = args.near ? resolveLocation(String(args.near)) : null;
   const lat = typeof args.lat === "number" ? args.lat : null;
   const lon = typeof args.lon === "number" ? args.lon : null;
-  const near = nearText ?? (lat !== null && lon !== null ? [lat, lon] as [number, number] : null);
+  const near = nearText ?? (lat !== null && lon !== null ? ([lat, lon] as [number, number]) : null);
   return {
     min_price: typeof args.min_price === "number" ? args.min_price : null,
     max_price: typeof args.max_price === "number" ? args.max_price : null,
@@ -96,40 +121,246 @@ function runTool(call: ToolCall): unknown {
         note: call.args.note ? String(call.args.note) : null,
       });
     case "ask_user":
-      // pseudo-tool: the agent wants to ask the user a clarifying question.
-      // We do NOT call any backend tool; the orchestrator returns the question directly.
       return { kind: "ask_user", question: String(call.args.question ?? ""), why: String(call.args.why ?? "") };
     default:
       return { error: `unknown tool: ${call.tool}` };
   }
 }
 
-interface Msg { role: "user" | "assistant"; content: string }
+// --- Deterministic fallback (no LLM) ---
+// When the z-ai SDK is unavailable, we parse the query deterministically and
+// run a real searchProducts call so the user still gets real results.
+// We never fabricate data.
+function deterministicFallback(
+  message: string,
+  session: ShoppingSession
+): AgentResponseBody {
+  const parsed = parseQuery(message);
+  // Pass the FULL original message as query — searchProducts internally
+  // calls parseQuery which handles connectivity + budget extraction.
+  // Using only parsed.terms loses the connectivity and budget context.
+  let query = message;
+
+  // Fallback to keyword matching if message is too short
+  if (!query.trim()) {
+    const productKeywords = [
+      "ماوس", "کیبورد", "لپ‌تاپ", "هدفون", "موبایل", "دوربین", "تلویزیون",
+      "یخچال", "ماشین لباسشویی", "جاروبرقی", "کفش", "کتونی", "پاور بانک",
+      "شارژر", "کابل", "رم", "هارد", "مودم", "تبلت", "ساعت",
+    ];
+    for (const kw of productKeywords) {
+      if (message.includes(kw)) {
+        query = kw;
+        break;
+      }
+    }
+  }
+
+  if (!query) {
+    return {
+      reply:
+        "دستیار هوشمند در حال حاضر در دسترس نیست. اما می‌توانی از تب «جست‌وجو» استفاده کنی تا محصولات را پیدا کنی. لطفاً دوباره تلاش کن.",
+      tool: null,
+      tool_args: null,
+      tool_result: null,
+      tool_error: null,
+      generative: null,
+      session,
+      fallback: true,
+    };
+  }
+
+  // Do a real search with the detected query — use parsed connectivity + budget
+  try {
+    const tools = getTools();
+    const filters = sessionToFilters(session);
+    // Merge parsed budget from the query itself (overrides session if present)
+    const searchFilters: Filters = {
+      max_price: parsed.maxBudget ?? filters.max_price ?? null,
+      min_price: parsed.minBudget ?? filters.min_price ?? null,
+      near: filters.near ? resolveLocation(filters.near) : null,
+      installment_only: filters.installment_only,
+      sort: (filters.sort as Filters["sort"]) || "relevance",
+      limit: 12,
+    };
+    const result = tools.searchProducts(query, searchFilters);
+
+    const updatedSession = updateSession(session, {
+      productQuery: query,
+      category: parsed.terms[0] ?? query,
+      budgetMax: parsed.maxBudget ?? session.budgetMax,
+      budgetMin: parsed.minBudget ?? session.budgetMin,
+      answersGiven: [...new Set([...session.answersGiven, "budget"])],
+    });
+
+    const count = result.total;
+    const cheapest = result.items.find((i) => i.min_price_toman !== null);
+    const reply = count > 0
+      ? `${count} محصول پیدا شد${
+          cheapest && cheapest.min_price_toman !== null
+            ? `. ارزان‌ترین: ${cheapest.title} با قیمت ${cheapest.min_price_toman.toLocaleString("fa-IR")} تومان.`
+            : ""
+        }. برای جزئیات و مقایسه روی محصولات کلیک کن.`
+      : `نتیجه‌ای پیدا نشد. عبارت را کلیک‌تر کن.`;
+
+    return {
+      reply,
+      tool: "search_products",
+      tool_args: { query },
+      tool_result: result,
+      tool_error: null,
+      generative: null,
+      session: updatedSession,
+      fallback: true,
+    };
+  } catch (e) {
+    return {
+      reply: "خطا در جست‌وجو. لطفاً دوباره تلاش کن.",
+      tool: null,
+      tool_args: null,
+      tool_result: null,
+      tool_error: e instanceof Error ? e.message : String(e),
+      generative: null,
+      session,
+      fallback: true,
+    };
+  }
+}
+
+interface Msg {
+  role: "user" | "assistant";
+  content: string;
+}
 
 export async function POST(req: Request) {
   let body: any;
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "invalid JSON body", code: "validation_error" }, { status: 400 });
+    return NextResponse.json(
+      { error: "invalid JSON body", code: "validation_error" } satisfies AgentResponseBody,
+      { status: 400 }
+    );
   }
   const question = typeof body?.message === "string" ? body.message.trim() : "";
   if (!question) {
-    return NextResponse.json({ error: "message is required", code: "validation_error" }, { status: 400 });
+    return NextResponse.json(
+      { error: "message is required", code: "validation_error" } satisfies AgentResponseBody,
+      { status: 400 }
+    );
   }
-  // optional conversation history so the agent can keep context (Phase 1 ask:
-  // "don't re-ask answered questions"). Each item {role, content}.
   const history: Msg[] = Array.isArray(body?.history)
-    ? body.history.filter((m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+    ? body.history.filter(
+        (m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string"
+      )
     : [];
+
+  // Session state (persisted client-side, sent back each turn)
+  let session: ShoppingSession = body?.session
+    ? { ...createSession(), ...body.session }
+    : createSession();
+
+  // Update session from the user's message (simple keyword extraction)
+  // Budget: look for numbers + میلیون/هزار/میلیارد (also normalize Persian digits first)
+  const normalizedQ = question
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+  const budgetMatch = normalizedQ.match(
+    /(?:زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از|بین)?\s*(\d+(?:[,.]\d+)?)\s*(?:تا|-\s*)?\s*(?:(\d+(?:[,.]\d+)?)\s*)?(میلیارد|میلیون|هزار)?/
+  );
+  if (budgetMatch) {
+    const n = parseFloat(budgetMatch[1].replace(/,/g, ""));
+    const mult =
+      budgetMatch[3] === "میلیارد"
+        ? 1_000_000_000
+        : budgetMatch[3] === "میلیون"
+          ? 1_000_000
+          : budgetMatch[3] === "هزار"
+            ? 1_000
+            : 1;
+    const amount = Math.round(n * mult);
+    // If "بین X تا Y" → set min=X, max=Y
+    if (budgetMatch[2]) {
+      const n2 = parseFloat(budgetMatch[2].replace(/,/g, ""));
+      const amount2 = Math.round(n2 * mult);
+      session = updateSession(session, { budgetMin: Math.min(amount, amount2), budgetMax: Math.max(amount, amount2), answersGiven: [...new Set([...session.answersGiven, "budget"])] });
+    } else {
+      session = updateSession(session, { budgetMax: amount, answersGiven: [...new Set([...session.answersGiven, "budget"])] });
+    }
+  }
+
+  // Product query: extract known product keywords
+  const productKeywords = [
+    "ماوس", "کیبورد", "لپ‌تاپ", "هدفون", "موبایل", "دوربین", "تلویزیون",
+    "یخچال", "ماشین لباسشویی", "جاروبرقی", "کفش", "کتونی", "پاور بانک",
+    "شارژر", "کابل", "رم", "هارد", "مودم", "تبلت", "ساعت",
+  ];
+  for (const kw of productKeywords) {
+    if (question.includes(kw)) {
+      session = updateSession(session, {
+        productQuery: kw,
+        category: kw,
+      });
+      break;
+    }
+  }
+
+  // Installment
+  if (question.includes("قسطی") || question.includes("اقساط")) {
+    session = updateSession(session, { installmentOnly: true, answersGiven: [...new Set([...session.answersGiven, "installment"])] });
+  }
+
+  // Neighborhood
+  const neighborhoods = ["صادقیه", "ولنجک", "ونک", "میدان ولیعصر", "تجریش", "شریعتی"];
+  for (const nb of neighborhoods) {
+    if (question.includes(nb)) {
+      session = updateSession(session, { neighborhood: nb });
+      break;
+    }
+  }
+
+  // Detect use-type answers (from generative UI selections)
+  const useValues = ["university", "walking", "running", "everyday", "mixed", "office", "gaming", "programming", "calls", "music", "work"];
+  for (const u of useValues) {
+    if (normalizedQ === u || normalizedQ.includes(u)) {
+      session = updateSession(session, { intendedUse: u, answersGiven: [...new Set([...session.answersGiven, "use"])] });
+      break;
+    }
+  }
+
+  // Detect priority answers (from generative UI selections)
+  const priorityValues = ["comfort", "appearance", "durability", "price", "balanced", "precision", "wireless", "mechanical", "quiet", "performance", "portability", "battery", "sound", "noise_cancel"];
+  for (const p of priorityValues) {
+    if (normalizedQ === p || normalizedQ.includes(p)) {
+      session = updateSession(session, { priority: p as any, answersGiven: [...new Set([...session.answersGiven, "priority"])] });
+      break;
+    }
+  }
+
+  // Detect "رد شد" (skip) — mark the current question as answered
+  if (question === "رد شد" || question.includes("رد شد")) {
+    // Don't set any value, but mark whatever question was pending as answered.
+    // We check which question is pending and mark it as answered.
+    if (!session.answersGiven.includes("budget")) {
+      session = updateSession(session, { answersGiven: [...new Set([...session.answersGiven, "budget"])] });
+    } else if (!session.answersGiven.includes("use")) {
+      session = updateSession(session, { answersGiven: [...new Set([...session.answersGiven, "use"])] });
+    } else if (!session.answersGiven.includes("priority")) {
+      session = updateSession(session, { answersGiven: [...new Set([...session.answersGiven, "priority"])] });
+    } else if (!session.answersGiven.includes("installment")) {
+      session = updateSession(session, { answersGiven: [...new Set([...session.answersGiven, "installment"])] });
+    }
+  }
 
   try {
     const zai = await ZAI.create();
 
-    // Step 1: ask the model which tool to call, with conversation history.
+    // Step 1: ask the model which tool to call, with conversation history + session context.
+    const sessionContext = `\n\n[Session context: category=${session.category ?? "?"}, budget_max=${session.budgetMax ?? "?"}, priority=${session.priority ?? "?"}, use=${session.intendedUse ?? "?"}, installment=${session.installmentOnly}, near=${session.neighborhood ?? "?"}]`;
+
     const pick = await zai.chat.completions.create({
       messages: [
-        { role: "assistant", content: AGENT_SYSTEM_PROMPT },
+        { role: "assistant", content: AGENT_SYSTEM_PROMPT + sessionContext },
         ...history.map((m) => ({ role: m.role, content: m.content })),
         { role: "user", content: question },
       ],
@@ -144,12 +375,16 @@ export async function POST(req: Request) {
     let toolError: string | null = null;
 
     if (!call) {
+      // Model didn't emit a tool call — return its text as-is (or a fallback)
       return NextResponse.json({
         reply: pickText.trim() || "متأسفم، نتونستم ابزار مناسبی انتخاب کنم. لطفاً سؤال را دقیق‌تر بپرسید.",
         tool: null,
         tool_args: null,
         tool_result: null,
-      });
+        tool_error: null,
+        generative: null,
+        session,
+      } satisfies AgentResponseBody);
     }
 
     toolName = call.tool;
@@ -161,22 +396,25 @@ export async function POST(req: Request) {
       toolResult = { error: toolError };
     }
 
-    // If the agent asked the user a clarifying question, short-circuit and return it
-    // directly (no second LLM call needed — the question is already Persian).
+    // If the agent asked a clarifying question, return it + a generative payload
     if (toolResult && typeof toolResult === "object" && (toolResult as any).kind === "ask_user") {
       const au = toolResult as { kind: string; question: string; why: string };
+      // Also generate a structured question if the session has a next question
+      const next = nextQuestion(session);
       return NextResponse.json({
         reply: au.question,
         tool: "ask_user",
         tool_args: toolArgs,
         tool_result: toolResult,
         tool_error: null,
-      });
+        generative: next?.payload ?? null,
+        session,
+      } satisfies AgentResponseBody);
     }
 
     // Step 2: ask the model for a Persian answer grounded in the tool result.
     const summaryPrompt = AGENT_SUMMARY_PROMPT.replace("{QUESTION}", question)
-      .replace("{TOOL}", toolName)
+      .replace("{TOOL}", String(toolName))
       .replace("{RESULT}", JSON.stringify(toolResult, null, 2).slice(0, 6000));
 
     const final = await zai.chat.completions.create({
@@ -188,17 +426,21 @@ export async function POST(req: Request) {
     });
     const reply = final.choices?.[0]?.message?.content?.trim() || "";
 
+    // Check if there's a next structured question to show
+    const next = nextQuestion(session);
+
     return NextResponse.json({
       reply,
       tool: toolName,
       tool_args: toolArgs,
       tool_result: toolResult,
       tool_error: toolError,
-    });
+      generative: next?.payload ?? null,
+      session,
+    } satisfies AgentResponseBody);
   } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : String(e), code: "agent_error" },
-      { status: 500 }
-    );
+    // LLM unavailable — fall back to deterministic parsing
+    const fallbackResult = deterministicFallback(question, session);
+    return NextResponse.json(fallbackResult satisfies AgentResponseBody);
   }
 }

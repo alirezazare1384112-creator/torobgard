@@ -1,18 +1,16 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, Info, X } from "lucide-react";
+import { Info, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 /**
  * A dismissible banner shown at the top of the page when the dataset is
- * synthetic (meta.is_synthetic === true). Stored in localStorage so the
- * user stays dismissed across reloads of the synthetic dev dataset.
+ * synthetic. Only shown in development — not in production with real data.
  */
 export function SyntheticBanner({ isSynthetic }: { isSynthetic: boolean }) {
   const [dismissed, setDismissed] = React.useState(false);
 
-  // read once on mount so SSR/CSR agree (suppressHydrationWarning on <html>)
   React.useEffect(() => {
     if (typeof window !== "undefined") {
       setDismissed(window.localStorage.getItem("torobgard:synthetic-banner-dismissed") === "1");
@@ -27,10 +25,9 @@ export function SyntheticBanner({ isSynthetic }: { isSynthetic: boolean }) {
       className="sticky top-0 z-40 w-full border-b border-amber-500/30 bg-amber-50 text-amber-900 dark:bg-amber-950/60 dark:text-amber-100"
     >
       <div className="mx-auto flex max-w-6xl items-start gap-3 px-4 py-2.5 text-sm">
-        <AlertTriangle className="mt-0.5 size-5 shrink-0" aria-hidden />
+        <X className="mt-0.5 size-5 shrink-0" aria-hidden />
         <p className="flex-1 leading-relaxed">
-          <span className="font-semibold">نمایشی:</span> این داده نمونه مصنوعی است برای
-          توسعه؛ دیتابیس واقعی جایگزین می‌شود.
+          <span className="font-semibold">داده نمایشی:</span> این نسخه از داده نمونه استفاده می‌کند.
         </p>
         <Button
           size="sm"
@@ -39,11 +36,7 @@ export function SyntheticBanner({ isSynthetic }: { isSynthetic: boolean }) {
           className="h-8 shrink-0 px-2 text-amber-900 hover:bg-amber-100 dark:text-amber-100 dark:hover:bg-amber-900/50"
           onClick={() => {
             setDismissed(true);
-            try {
-              window.localStorage.setItem("torobgard:synthetic-banner-dismissed", "1");
-            } catch {
-              /* ignore */
-            }
+            try { window.localStorage.setItem("torobgard:synthetic-banner-dismissed", "1"); } catch {}
           }}
         >
           <X className="size-4" />
@@ -53,7 +46,7 @@ export function SyntheticBanner({ isSynthetic }: { isSynthetic: boolean }) {
   );
 }
 
-/** Small inline list of disclaimers, used near price/offer cards and in footer. */
+/** Concise, user-friendly data notes for the footer. */
 export function DisclaimerList({
   compact = false,
   className = "",
@@ -63,17 +56,15 @@ export function DisclaimerList({
 }) {
   const items = compact
     ? [
-        "نام فروشگاه‌ها مصنوعی است",
-        "قیمت‌ها ممکن است قدیمی باشند",
-        "اطلاعات موجودی در داده نیست",
-        "حدود ۴٫۵٪ پیشنهادها قیمت ندارند",
+        "نام فروشگاه‌ها نمایشی است",
+        "قیمت‌ها ممکن است تغییر کرده باشند",
+        "موجودی تأیید نشده است",
       ]
     : [
-        "نام فروشگاه‌ها در دیتاست Torob مصنوعی است (نه کسب‌وکار واقعی).",
-        "قیمت‌ها ممکن است قدیمی باشند؛ مهر زمانی تا ۲۰۲۰ برمی‌گردد.",
-        "اطلاعات موجودی (stock) در داده وجود ندارد.",
-        "حدود ۴٫۵٪ پیشنهادها قیمت ندارند (price_status = missing).",
-        "موقعیت جغرافیایی نقشه شماتیک است، نه مسیریابی واقعی.",
+        "نام فروشگاه‌ها نمایشی است و کسب‌وکار واقعی نیستند.",
+        "قیمت‌ها قیمت ثبت‌شده هستند و ممکن است تغییر کرده باشند.",
+        "موجودی کالا تأیید نشده است — قبل از مراجعه تماس بگیرید.",
+        "فاصله‌های نمایش‌داده‌شده تقریبی (هوایی) هستند، نه مسیر رانندگی.",
       ];
   return (
     <ul className={`space-y-1 ${className}`}>
@@ -87,15 +78,14 @@ export function DisclaimerList({
   );
 }
 
-/** A tiny inline "نام مصنوعی" warning badge used next to synthetic shop names. */
+/** Small badge next to shop names — concise, not alarming. */
 export function SyntheticNameBadge() {
   return (
     <span
-      title="نام این فروشگاه مصنوعی است"
-      className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+      title="نام نمایشی"
+      className="inline-flex items-center gap-1 rounded border border-muted-foreground/30 bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
     >
-      <AlertTriangle className="size-2.5" aria-hidden />
-      نام مصنوعی
+      نمایشی
     </span>
   );
 }

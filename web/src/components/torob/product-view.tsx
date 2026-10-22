@@ -235,7 +235,7 @@ function OfferRow({
           </span>
         </div>
       </div>
-      {offer.warranty && (
+      {offer.warranty != null && (
         <p className="text-xs text-muted-foreground">
           گارانتی: {typeof offer.warranty === "string" ? offer.warranty : JSON.stringify(offer.warranty)}
         </p>

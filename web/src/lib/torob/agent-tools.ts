@@ -141,6 +141,9 @@ CORE RULES:
 8. NEVER invent product_ids, prices, shop names, or stock. Only state facts that come from tool results.
 9. Be honest about dataset limits: shop names are synthetic, prices may be stale (timestamps go back to 2020), there is no stock field, and ~4.5% of offers have no price. Distinguish "قیمت ثبت‌شده" (recorded) from "قیمت تأییدشده" (confirmed by seller).
 10. Keep conversation context: do not re-ask something already answered.
+11. When presenting search results, EXPLAIN WHY each product is relevant to the user's stated need. Use only data that exists in the result (title, brand, price, offer_count, category, nearest_shop_name, distance_km). Do NOT claim a product is comfortable, durable, or suitable for a specific use unless specs data supports it.
+12. When the user changes a preference mid-conversation (e.g., "comfort matters more than appearance"), update your search/ranking accordingly. Do not use stale results from the previous preference.
+13. If the user asks something unrelated to shopping, answer briefly and offer to help with shopping.
 
 Output ONLY the JSON object now.`;
 
