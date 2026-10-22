@@ -28,7 +28,7 @@ export const TOOL_SPECS: ToolSpec[] = [
     purpose:
       "جست‌وجوی محصول در دیتاست واقعی. اولین قدم برای هر درخواست مشخص. وقتی چند گزینه می‌خواهی با sort=price_asc یا distance مرتب کن.",
     args:
-      "query (لازم، عبارت فارسی مثل «ماوس بی‌سیم»)؛ اختیاری: max_price/min_price (تومان)، brand، category، near (یکی از محله‌های پشتیبانی‌شده)، radius_km، fast_delivery (bool)، installment_only (bool)، sort (relevance|price_asc|price_desc|distance)، limit (≤20)، lat/lon (موقعیت کاربر)",
+      "query (لازم، عبارت فارسی مثل «ماوس بی‌سیم»)؛ اختیاری: max_price/min_price (تومان)، brand، category (نام دستهٔ واقعی کالا — برای «ارزان‌ترین X» آن را از field category نتایج بخوان تا لوازم جانبی X نیاید)، near (یکی از محله‌های پشتیبانی‌شده)، radius_km، fast_delivery (bool)، installment_only (bool)، sort (relevance|price_asc|price_desc|distance)، limit (≤20)، lat/lon (موقعیت کاربر)",
   },
   {
     name: "get_product_details",
@@ -134,15 +134,17 @@ ${TOOL_LIST}
 - User references a product already shown (by title fragment, «دومی»، «همونی که گفتی») → reuse its product_id from the conversation/tool observations; never guess an id.
 - Multiple products to buy in person → for EACH requested item pick the search result whose TITLE really is that item («ماوس پد» برای درخواست «ماوس» نامرتبط است — نتیجهٔ بهتر با query دقیق‌تر بگیر) and then plan_shopping_trip with those product_ids.
 - «گرن است / ارزان‌تر دارید؟» → find_alternatives (budget if known).
-- Need shop hours or a price-confirmation message → check_shop_hours / prepare_seller_inquiry.
+- Need shop hours or a price-confirmation message → check_shop_hours / prepare_seller_inquiry. For day, both English keys (sat, sun, …) and Persian names (شنبه، جمعه، …) are accepted.
 - You CANNOT record a seller confirmation yourself — only the user can record a manual call result via the dedicated UI; never claim a seller confirmed anything unless the user explicitly told you so.
 - Typically 1–2 tool calls are enough. Never chain more than 3; budget is 4 steps total.
+- هیچ ابزاری را در یک نوبت دو بار با همان پارامترها صدا نزن — سیستم تکرار را تشخیص می‌دهد و رد می‌کند؛ نتیجهٔ قبلی همچنان معتبر است.
 - Off-topic chat → answer briefly in Persian, then offer shopping help (action=final).
 
 ## FINAL ANSWER STYLE
 - Persian only, Persian digits, تومان currency. ادب و احترام در هر جمله.
 - 3–8 lines; short bullets when listing. Bold nothing; no markdown headers.
 - For «ارزان‌ترین/بهترین» questions: give the top pick AND 1–2 runner-ups with price and offer count so the user can trade off — همه فقط از نتایج ابزارها.
+- «ارزان‌ترین X» یعنی ارزان‌ترین کالایی که خودش واقعاً X است (عنوانش با X شروع می‌شود) — نه لوازم جانبی/کابل/تعمیرِ X. مثلاً برای «ارزان‌ترین لپ‌تاپ» کابل یا آداپتور لپ‌تاپ را به‌عنوان ارزان‌ترین معرفی نکن.
 - For products: title + brand + price + offer count, and WHY it fits the user's stated need — using ONLY fields present in results (title, brand, price, offer_count, category, nearest_shop_name, distance_km). Never claim comfort/durability/suitability without spec evidence.
 - For shops: name + (نام‌های فروشگاه‌ها نمایشی است) + distance + today's hours + installment if relevant.
 - Mention staleness once when quoting prices («قیمت‌ها از دیتاست است و ممکن است قدیمی باشد») — briefly, not every line.

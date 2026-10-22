@@ -158,6 +158,46 @@ function todayKey(d = tehranNow()): DayKey {
   return map[d.getDay()] ?? "sat";
 }
 
+/** Normalizes a user/model-supplied day value to a DayKey.
+ *  Accepts the English keys (sat..fri), full English names (saturday..friday,
+ *  case-insensitive, prefix-matched), Persian weekday names (شنبه، یکشنبه،
+ *  دوشنبه، سه‌شنبه، چهارشنبه، پنجشنبه، جمعه — with ZWNJ/space/compact
+ *  variants) and «امروز»/"today". Returns null for anything unrecognized
+ *  (callers fall back to today). Long compound names MUST be checked before
+ *  the bare «شنبه» (یکشنبه contains شنبه as a suffix). */
+function normalizeDayKey(day?: string | null): DayKey | null {
+  if (!day) return null;
+  // compact form: strip ZWNJ/whitespace/diacritics, fold Arabic chars, lowercase
+  const d = day
+    .replace(/[\u200c\u200f\u200e\s]/g, "")
+    .replace(/[\u064B-\u065F\u0670]/g, "")
+    .replace(/ي/g, "ی")
+    .replace(/ك/g, "ک")
+    .toLowerCase();
+  if (!d) return null;
+  if (d === "امروز" || d === "today" || d === "امروزه") return todayKey();
+  // Persian compound names first (suffix trap: «یکشنبه» contains «شنبه»)
+  if (d.includes("یکشنبه")) return "sun";
+  if (d.includes("دوشنبه")) return "mon";
+  if (d.includes("سهشنبه")) return "tue";
+  if (d.includes("چهارشنبه")) return "wed";
+  if (d.includes("پنجشنبه")) return "thu";
+  if (d.includes("جمعه")) return "fri";
+  if (d.includes("شنبه")) return "sat";
+  // English keys + full names (prefix match: sat/sat./saturday…)
+  const en = d.replace(/[^a-z]/g, "").slice(0, 3);
+  switch (en) {
+    case "sat": return "sat";
+    case "sun": return "sun";
+    case "mon": return "mon";
+    case "tue": return "tue";
+    case "wed": return "wed";
+    case "thu": return "thu";
+    case "fri": return "fri";
+    default: return null;
+  }
+}
+
 function hhmmToMinutes(t: string | undefined): number | null {
   if (!t) return null;
   const m = t.match(/^(\d{1,2}):(\d{2})/);
@@ -347,6 +387,20 @@ export class ShoppingTools {
     for (const t of negativeTerms) {
       whereParts.push("p.title_norm NOT LIKE ?");
       termParams.push(`%${t}%`);
+    }
+    // Category / brand filters. Previously these were declared on Filters but
+    // SILENTLY IGNORED here — both the agent's category refinement and the
+    // LLM's brand/category arguments never reached the SQL. Category matches
+    // exact OR as a prefix («لپ تاپ» also hits «لپ تاپ و نوت بوک»).
+    if (f.category && typeof f.category === "string" && f.category.trim()) {
+      const cat = f.category.trim();
+      whereParts.push("(p.category = ? OR p.category LIKE ?)");
+      termParams.push(cat, `${cat} %`);
+    }
+    if (f.brand && typeof f.brand === "string" && f.brand.trim()) {
+      const brand = f.brand.trim();
+      whereParts.push("(p.brand = ? OR p.brand LIKE ?)");
+      termParams.push(brand, `%${brand}%`);
     }
     const where = whereParts.join(" AND ");
 
@@ -839,6 +893,31 @@ export class ShoppingTools {
     };
   }
 
+  // ------------------------------------------------- device-category suggestion
+  /** Dominant dataset category among products whose TITLE starts with the
+   *  query phrase (e.g. «لپ تاپ» → «لپ تاپ و نوت بوک» with 472 products).
+   *  Used to refine «ارزان‌ترین X» searches: in a pure price-ascending window
+   *  the cheapest items are usually ACCESSORIES of X (cables, cases, adapters),
+   *  while the real devices live in X's own category. Returns null when no
+   *  category has ≥5 title-prefixed products (unknown/garbage phrases). */
+  suggestCategory(query: string): string | null {
+    const norm = normalizeText(query).replace(/\s+/g, " ").trim();
+    if (norm.length < 3) return null;
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT category, COUNT(*) AS c FROM products
+           WHERE category IS NOT NULL AND category != '' AND title_norm LIKE ?
+           GROUP BY category ORDER BY c DESC LIMIT 1`
+        )
+        .all(`${norm}%`) as { category: string; c: number }[];
+      const top = rows[0];
+      return top && top.c >= 5 ? top.category : null;
+    } catch {
+      return null;
+    }
+  }
+
   // --------------------------------------------------- shop hours (today + any day)
   /** Returns the open/closed status for a shop, today by default or for a given
    *  weekday key ("sat".."fri"). Uses Asia/Tehran time. */
@@ -847,8 +926,11 @@ export class ShoppingTools {
     const r = this.db
       .prepare("SELECT weekly_hours FROM shops WHERE shop_id = ?")
       .get(shop_id) as { weekly_hours: string | null } | undefined;
-    if (!r) return { status: "not_found", shop_id, day: day ?? todayKey(), hours: null, open_now: null, today_hours: null, full_week: null, day_info: null };
-    const key = (day as DayKey) || todayKey();
+    // Accept English keys/names, Persian weekday names and «امروز» — anything
+    // else (a hallucinated value) degrades to today instead of a bogus key
+    // that silently zeroes out day_info.
+    const key = normalizeDayKey(day) ?? todayKey();
+    if (!r) return { status: "not_found", shop_id, day: key, hours: null, open_now: null, today_hours: null, full_week: null, day_info: null };
     const today = parseTodayHours(r.weekly_hours);
     let fullWeek: Record<string, { status: string; open: string; close: string }> | null = null;
     if (r.weekly_hours) {

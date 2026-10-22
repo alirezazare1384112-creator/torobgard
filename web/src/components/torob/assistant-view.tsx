@@ -21,10 +21,14 @@ import {
   Phone,
   Plus,
   Route,
+  RotateCcw,
   Send,
   ShieldCheck,
   Sparkles,
   Store,
+  ThumbsDown,
+  ThumbsUp,
+  Trash2,
   User,
   Wrench,
   X,
@@ -69,6 +73,10 @@ interface ChatMessage {
   steps?: AgentStep[];
   suggestions?: Suggestion[];
   streaming?: boolean;
+  /** user's thumbs vote on this assistant reply (one vote per message) */
+  vote?: "up" | "down" | null;
+  /** network/agent failure bubble — renders a retry button */
+  isError?: boolean;
 }
 
 const STARTERS = [
@@ -81,6 +89,54 @@ const STARTERS = [
 /** Hard cap matching the server's Zod limit (message ≤ 2000 chars) so a long
  *  paste can never 400 the request — the input itself blocks more text. */
 const MAX_MESSAGE_LEN = 2000;
+
+/** sessionStorage key for the refresh-safe conversation (chat is per-tab —
+ *  a new browser tab starts a fresh conversation, a refresh keeps it). */
+const CHAT_STORAGE_KEY = "torobgard:chat:v2";
+/** Soft budget for the persisted payload — beyond this, drop older message
+ *  payloads instead of throwing on the sessionStorage quota. */
+const CHAT_STORAGE_BUDGET = 400_000;
+
+/** Shrinks a step observation for storage: keep small observations verbatim
+ *  (they power the expandable trace details), replace bulky ones with a note. */
+function smallObservation(obs: unknown): unknown {
+  try {
+    const s = JSON.stringify(obs);
+    if (!s || s.length <= 1400) return obs;
+    return { note: "نتیجهٔ کامل این قدم برای صرفه‌جویی در حافظه ذخیره نشد" };
+  } catch {
+    return null;
+  }
+}
+
+/** Compacts the conversation for sessionStorage: last 24 non-streaming
+ *  messages, card arrays capped at 8 entries, bulky fields dropped. The
+ *  rendered cards, suggestion chips, step traces and cross-turn facts all
+ *  survive a refresh; only deep expandable detail is lossy-capped. */
+function slimForStorage(messages: ChatMessage[]): ChatMessage[] {
+  return messages
+    .filter((m) => !m.streaming && m.text.trim().length > 0)
+    .slice(-24)
+    .map((m) => {
+      let toolResult: unknown = m.toolResult;
+      if (toolResult && typeof toolResult === "object") {
+        try {
+          const r = { ...(toolResult as Record<string, unknown>) };
+          for (const key of ["items", "offers", "shops", "alternatives", "plan"]) {
+            const arr = r[key];
+            if (Array.isArray(arr)) r[key] = arr.slice(0, 8);
+          }
+          delete r.full_week; // bulky weekly-hours JSON, unused by chat cards
+          if (typeof r.hours === "string" && r.hours.length > 2000) r.hours = null;
+          toolResult = r;
+        } catch {
+          toolResult = null;
+        }
+      }
+      const steps = (m.steps ?? []).map((s) => ({ ...s, observation: smallObservation(s.observation) }));
+      return { ...m, streaming: false, toolResult, steps };
+    });
+}
 
 function trimResult(r: unknown): string {
   try {
@@ -404,6 +460,126 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
   // chip clicks could both pass the `loading` check and fire two interleaved
   // requests (double bubbles, cross-patched streams). A ref is immediate.
   const busyRef = React.useRef(false);
+  // hydration guard: skip the first save effect until the sessionStorage
+  // restore has run, otherwise the initial empty render wipes the saved chat.
+  const hydratedRef = React.useRef(false);
+
+  // Restore the refresh-safe conversation once on mount (client-only —
+  // sessionStorage is not available during SSR, and the initial render
+  // must match the server output to avoid hydration mismatches).
+  React.useEffect(() => {
+    hydratedRef.current = true;
+    try {
+      const raw = sessionStorage.getItem(CHAT_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { messages?: unknown[]; session?: unknown };
+        if (Array.isArray(parsed?.messages) && parsed.messages.length) {
+          const restored: ChatMessage[] = (parsed.messages as unknown[])
+            .filter(
+              (m): m is ChatMessage =>
+                !!m && typeof (m as ChatMessage).role === "string" &&
+                ((m as ChatMessage).role === "user" || (m as ChatMessage).role === "assistant") &&
+                typeof (m as ChatMessage).text === "string" && (m as ChatMessage).text.trim().length > 0
+            )
+            .map((m) => ({ ...m, streaming: false, isError: false, vote: m.vote ?? null }));
+          if (restored.length) {
+            setMessages(restored);
+            if (parsed.session && typeof parsed.session === "object") {
+              setSession(parsed.session as ShoppingSession);
+            }
+          }
+        }
+      }
+    } catch {
+      /* corrupted storage — start a fresh conversation */
+    }
+  }, []);
+
+  // Persist after every change (messages/session) — refresh-safe chat.
+  React.useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      if (!messages.length) {
+        sessionStorage.removeItem(CHAT_STORAGE_KEY);
+        return;
+      }
+      const payload = JSON.stringify({ messages: slimForStorage(messages), session, v: 2 });
+      if (payload.length <= CHAT_STORAGE_BUDGET) {
+        sessionStorage.setItem(CHAT_STORAGE_KEY, payload);
+      } else {
+        // over budget: persist without the heavy tool results at all
+        const light = slimForStorage(messages).map((m) => ({ ...m, toolResult: null, steps: (m.steps ?? []).map((s) => ({ ...s, observation: null })) }));
+        const lightPayload = JSON.stringify({ messages: light, session, v: 2 });
+        if (lightPayload.length <= CHAT_STORAGE_BUDGET) sessionStorage.setItem(CHAT_STORAGE_KEY, lightPayload);
+        else sessionStorage.removeItem(CHAT_STORAGE_KEY);
+      }
+    } catch {
+      /* quota exceeded — persistence is best-effort, never disturb the chat */
+    }
+  }, [messages, session]);
+
+  /** Start a fresh conversation (clears messages, session, storage, picks). */
+  const clearChat = () => {
+    if (loading) return;
+    setMessages([]);
+    setSession(null);
+    setPicked({});
+    try {
+      sessionStorage.removeItem(CHAT_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  /** Retry a failed exchange: drops the error bubble and its user bubble,
+   *  then re-sends the same text. */
+  const retryMessage = (msgId: string) => {
+    if (loading || busyRef.current) return;
+    const idx = messages.findIndex((m) => m.id === msgId);
+    if (idx === -1) return;
+    let userIdx = -1;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (messages[i].role === "user") {
+        userIdx = i;
+        break;
+      }
+    }
+    const retryText = userIdx >= 0 ? messages[userIdx].text : "";
+    if (!retryText) return;
+    const dropIds = new Set([msgId, ...(userIdx >= 0 ? [messages[userIdx].id] : [])]);
+    setMessages((ms) => ms.filter((m) => !dropIds.has(m.id)));
+    // wait a tick so the state settles before send() reads `messages` for history
+    setTimeout(() => send(retryText), 0);
+  };
+
+  /** Thumbs vote on an assistant reply — optimistic UI + fire-and-forget log. */
+  const voteOnMessage = (msgId: string, rating: "up" | "down") => {
+    const idx = messages.findIndex((m) => m.id === msgId);
+    if (idx === -1) return;
+    const msg = messages[idx];
+    if (msg.vote) return; // one vote per message
+    setMessages((ms) => ms.map((m) => (m.id === msgId ? { ...m, vote: rating } : m)));
+    let question = "";
+    for (let i = idx - 1; i >= 0; i--) {
+      if (messages[i].role === "user") {
+        question = messages[i].text;
+        break;
+      }
+    }
+    fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rating,
+        question: question.slice(0, 400),
+        reply_excerpt: msg.text.slice(0, 600),
+        tools: (msg.steps ?? []).map((s) => s.tool).slice(0, 8),
+        fallback: msg.fallback ?? false,
+      }),
+    }).catch(() => {
+      /* telemetry is best-effort */
+    });
+  };
 
   React.useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -521,17 +697,17 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
             else if (ev.type === "done" && ev.payload) { gotTerminal = true; finalize(ev.payload); }
             else if (ev.type === "error") {
               gotTerminal = true;
-              patchLive({ text: sanitizeText(`خطا در دستیار: ${ev.error ?? "نامشخص"}`), streaming: false });
+              patchLive({ text: sanitizeText(`خطا در دستیار: ${ev.error ?? "نامشخص"}`), streaming: false, isError: true });
             }
           }
         }
         // stream ended without a terminal event → close gracefully
         if (!gotTerminal) {
-          patchLive((prev) => (prev.text ? { streaming: false } : { text: "ارتباط قطع شد — لطفاً دوباره بپرس.", streaming: false }));
+          patchLive((prev) => (prev.text ? { streaming: false } : { text: "ارتباط قطع شد — لطفاً دوباره بپرس.", streaming: false, isError: true }));
         }
       }
     } catch (e) {
-      patchLive({ text: `خطا در ارتباط با دستیار: ${e instanceof Error ? e.message : String(e)}`, streaming: false });
+      patchLive({ text: `خطا در ارتباط با دستیار: ${e instanceof Error ? e.message : String(e)}`, streaming: false, isError: true });
     } finally {
       liveIdRef.current = null;
       busyRef.current = false;
@@ -558,13 +734,26 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-6 sm:py-8">
       <header className="flex flex-col gap-1">
-        <h2 className="flex items-center gap-2 text-xl font-bold">
-          <Bot className="size-5" aria-hidden />دستیار خرید
-          <Badge variant="secondary" className="gap-1"><Sparkles className="size-3" aria-hidden />چندمرحله‌ای</Badge>
-        </h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-xl font-bold">
+            <Bot className="size-5" aria-hidden />دستیار خرید
+            <Badge variant="secondary" className="gap-1"><Sparkles className="size-3" aria-hidden />چندمرحله‌ای</Badge>
+          </h2>
+          {messages.length > 0 && (
+            <button
+              type="button"
+              onClick={clearChat}
+              disabled={loading}
+              className="flex min-h-9 items-center gap-1 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              title="پیام‌ها و حافظهٔ خرید را پاک کن"
+            >
+              <Trash2 className="size-3.5" aria-hidden />گفتگوی جدید
+            </button>
+          )}
+        </div>
         <p className="text-xs text-muted-foreground">
           بگو چی می‌خوای — دستیار قدم‌به‌قدم فکر می‌کند (جست‌وجو → مقایسه → پاسخ)، سؤال‌های لازم را می‌پرسد،
-          و برای تأیید قیمت/موجودی بهت کمک می‌کند با فروشگاه تماس بگیری.
+          و برای تأیید قیمت/موجودی بهت کمک می‌کند با فروشگاه تماس بگیری. گفتگو با نوسازی صفحه پاک نمی‌شود.
         </p>
       </header>
 
@@ -662,6 +851,54 @@ export function AssistantView({ onPickProduct }: { onPickProduct?: (id: string) 
                         {s.label}
                       </button>
                     ))}
+                  </div>
+                )}
+
+                {/* Retry a failed exchange (network/agent error bubbles) */}
+                {m.role === "assistant" && m.isError && !m.streaming && (
+                  <button
+                    type="button"
+                    onClick={() => retryMessage(m.id)}
+                    disabled={loading}
+                    className="flex min-h-8 items-center gap-1 rounded-full border border-border bg-card px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <RotateCcw className="size-3" aria-hidden />تلاش دوباره
+                  </button>
+                )}
+
+                {/* Feedback — one thumbs vote per finished assistant reply */}
+                {m.role === "assistant" && !m.streaming && !m.isError && m.text && (
+                  <div className="flex w-full max-w-[94%] items-center gap-1 pt-0.5" dir="ltr">
+                    <span className="text-[10px] text-muted-foreground" dir="rtl">این پاسخ مفید بود؟</span>
+                    <button
+                      type="button"
+                      onClick={() => voteOnMessage(m.id, "up")}
+                      disabled={!!m.vote}
+                      aria-label="پاسخ خوب بود"
+                      aria-pressed={m.vote === "up"}
+                      className={`flex size-7 items-center justify-center rounded-full border transition-colors disabled:cursor-default ${
+                        m.vote === "up"
+                          ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-600"
+                          : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+                      }`}
+                    >
+                      <ThumbsUp className="size-3.5" aria-hidden />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => voteOnMessage(m.id, "down")}
+                      disabled={!!m.vote}
+                      aria-label="پاسخ مفید نبود"
+                      aria-pressed={m.vote === "down"}
+                      className={`flex size-7 items-center justify-center rounded-full border transition-colors disabled:cursor-default ${
+                        m.vote === "down"
+                          ? "border-red-500/60 bg-red-500/15 text-red-600"
+                          : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+                      }`}
+                    >
+                      <ThumbsDown className="size-3.5" aria-hidden />
+                    </button>
+                    {m.vote && <span className="text-[10px] text-muted-foreground" dir="rtl">{m.vote === "up" ? "ممنون از بازخوردتون" : "ثبت شد؛ بهتر می‌شیم"}</span>}
                   </div>
                 )}
 

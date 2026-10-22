@@ -202,26 +202,36 @@ export function parseQuery(query: string): ParsedQuery {
     }
   }
 
-  // Negative filters: "بدون X" / "نه X" — exclude term X from results
-  const negativeRe = /(?:بدون|نه)\s+(\S+)/g;
+  // Negative filters: "بدون X" / "نه X" — exclude term X from results.
+  // ANCHORED to token boundaries: the bare substring «نه» would also match
+  // inside words like «ماهانه» (ماها**نه** گوشی → would eat the next token).
+  const negativeRe = /(^|\s)(?:بدون|نه)\s+(\S+)/g;
   const negatives: string[] = [];
   let negMatch;
   while ((negMatch = negativeRe.exec(norm)) !== null) {
-    negatives.push(negMatch[1]);
+    negatives.push(negMatch[2]);
   }
   if (negatives.length > 0) {
-    budgetStripped = budgetStripped.replace(/(?:بدون|نه)\s+\S+/g, " ");
+    budgetStripped = budgetStripped.replace(/(^|\s)(?:بدون|نه)\s+\S+/g, "$1");
   }
 
-  // drop the budget prefix word, currency word, unit words, and connectivity tokens
-  // (Persian + English; case-insensitive for English)
+  // drop the budget prefix word, currency word, unit words, and connectivity
+  // tokens (Persian + English; case-insensitive for English).
+  // Persian prefix words are dropped as WHOLE TOKENS ONLY — the old
+  // substring replace stripped «تا» out of «لپ تاپ» (terms degraded to «لپ»,
+  // which LIKE-matches «اسکالپ»!) and «کتاب» → «ک ب».
+  const PREFIX_WORD_TOKENS = new Set(["زیر", "تا", "حداکثر", "بین"]);
   let termStream = budgetStripped
-    .replace(/(زیر|تا|حداکثر|بیشتر\s*از|کمتر\s*از|بین)/g, " ")
+    .replace(/(بیشتر\s*از|کمتر\s*از)/g, " ")
     .replace(/\b(under|below|up\s*to|less\s*than|more\s*than|cheaper\s*than|max|million|billion|toman)\b/gi, " ")
     .replace(/toman|تومان|تومن/gi, " ")
     // standalone unit letters k/m after a number were already consumed by the
     // budget regex; drop any stragglers so they don't pollute the term stream.
     .replace(/\b[km]\b/gi, " ");
+  termStream = termStream
+    .split(/\s+/)
+    .filter((t) => t && !PREFIX_WORD_TOKENS.has(t))
+    .join(" ");
   const termTokens = termStream.split(/\s+/).filter((t) => t.length > 1);
   out.terms = termTokens.filter((t) => !stripConn.has(t));
 

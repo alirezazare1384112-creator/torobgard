@@ -323,6 +323,22 @@ function asFilters(args: Record<string, any>): Filters {
   };
 }
 
+/** Stable signature of a tool call (name + sorted arg values) used for
+ *  duplicate detection inside the agent loop. */
+function toolSignature(name: string, args: Record<string, unknown>): string {
+  const keys = Object.keys(args ?? {}).sort();
+  const parts = keys.map((k) => {
+    let v: string;
+    try {
+      v = JSON.stringify(args[k] ?? null) ?? "null";
+    } catch {
+      v = String(args[k]);
+    }
+    return `${k}=${v}`;
+  });
+  return `${name}|${parts.join("&")}`;
+}
+
 function cleanReply(s: string): string {
   if (!s) return s;
   return s
@@ -689,6 +705,24 @@ const PRODUCT_KEYWORDS = [
   "کولر", "اتو", "ظرفشویی", "جارو شیشه", "چای ساز", "قهوه ساز",
 ];
 
+/** English shopping words → the Persian PRODUCT_KEYWORDS equivalent, so an
+ *  English message ("cheap wireless mouse") still works in the degraded
+ *  no-LLM path and in keyword intent detection. Word-boundary matching only
+ *  ("ram" inside "program" must not match). */
+const EN_TO_FA_KEYWORDS: Array<[string, string]> = [
+  ["mouse", "ماوس"], ["mice", "ماوس"], ["keyboard", "کیبورد"], ["laptop", "لپ‌تاپ"],
+  ["notebook", "لپ‌تاپ"], ["headphone", "هدفون"], ["headphones", "هدفون"],
+  ["headset", "هدست"], ["earphone", "هندزفری"], ["earbuds", "هندزفری"],
+  ["phone", "موبایل"], ["mobile", "موبایل"], ["smartphone", "موبایل"],
+  ["tv", "تلویزیون"], ["television", "تلویزیون"], ["camera", "دوربین"],
+  ["fridge", "یخچال"], ["refrigerator", "یخچال"], ["vacuum", "جاروبرقی"],
+  ["shoe", "کفش"], ["shoes", "کفش"], ["sneaker", "کتونی"], ["sneakers", "کتونی"],
+  ["charger", "شارژر"], ["cable", "کابل"], ["ram", "رم"], ["ssd", "هارد"], ["hdd", "هارد"],
+  ["modem", "مودم"], ["tablet", "تبلت"], ["watch", "ساعت هوشمند"], ["speaker", "اسپیکر"],
+  ["fan", "پنکه"], ["monitor", "مانیتور"], ["printer", "پرینتر"], ["console", "کنسول"],
+  ["playstation", "پلی استیشن"],
+];
+
 const USE_VALUES = ["university", "walking", "running", "everyday", "mixed", "office", "gaming", "programming", "calls", "music", "work"];
 // PRIORITY_VALUES is declared once, next to the Zod schemas above.
 
@@ -713,7 +747,28 @@ function mentionsProductKeywords(message: string): string[] {
     }
     if (hit && !found.includes(k)) found.push(k);
   }
-  return found;
+  // English words (whole-token match only) → Persian keywords
+  const enTokens = new Set(
+    message
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean)
+  );
+  for (const [en, fa] of EN_TO_FA_KEYWORDS) {
+    if (enTokens.has(en) && !found.includes(fa)) found.push(fa);
+  }
+  // English two-word compounds
+  if (enTokens.has("power") && enTokens.has("bank") && !found.includes("پاور بانک")) found.push("پاور بانک");
+  if (enTokens.has("washing") && enTokens.has("machine") && !found.includes("ماشین لباسشویی")) found.push("ماشین لباسشویی");
+  // Variant dedup: «لپ‌تاپ» and «لپتاپ» (and «پاور بانک»/«پاوربانک») normalize
+  // to the same compact form — they are ONE product, not a multi-product trip.
+  const seenCompact = new Set<string>();
+  return found.filter((k) => {
+    const c = normalizeText(k).replace(/\s+/g, "");
+    if (seenCompact.has(c)) return false;
+    seenCompact.add(c);
+    return true;
+  });
 }
 
 function mentionsProductKeyword(message: string): string | null {
@@ -921,6 +976,10 @@ const STOPWORDS = new Set([
   "نزدیک", "نزدیکترین", "فروشگاه", "فروشگاهش", "فروشگاهها", "کجاست", "کجاست؟", "چیست",
   "چه", "کدام", "دومی", "اولی", "همون", "همونی", "الان", "دیگه", "باز", "کنید",
   "میخواد", "می‌خواد", "میکنی", "می‌کنی", "میتونی", "می‌تونی", "باشه؟", "خب", "دمت",
+  // question fillers — «قیمت X چند شروع میشه؟» must relax to «X», not
+  // «X شروع میشه» (the AND-semantics then kill the search and drop the brand)
+  "شروع", "شروعش", "میشه", "می‌شه", "چیه", "چیه؟", "هستش", "هستش؟", "بشه", "قیمتش",
+  "قیمتشون", "چندتا", "چندتاست", "می‌مونه", "میمونه", "می‌شیه", "میشیه",
   // filter/intent words that must never become SQL terms (handled via session)
   "قسطی", "اقساط", "دنبال", "لازم", "خواستم", "میخواستم", "می‌خواستم", "ببینم", "نشون",
 ]);
@@ -929,6 +988,34 @@ const STOPWORDS = new Set([
  *  («یه چیزی میخوام», «هلی کوپتر میخوام بخرم») — used to pick between a
  *  clarifying question and an off-topic redirect in the fallback. */
 const SHOPPING_INTENT_RE = /میخوام|می‌خوام|میخواهم|می‌خواهم|بخرم|بخریم|خرید|پیدا|قیمت|نمایش|بده|نشون|فروشگاه|دنبال|لازم|خواستم|میخواستم|می‌خواستم|ببینم|دارید|دارین/;
+
+/** Best pick from a search result list for a requested product phrase:
+ *  prefers titles that REALLY are the device (title starts with the query
+ *  phrase, e.g. «لپ تاپ لنوو …») over accessories of it («کابل لپ تاپ»،
+ *  «تبدیل آداپتور به لپ تاپ») and over repair/service listings («تعمیر …»).
+ *  Used when the fallback composes «ارزان‌ترین …» lines so the quoted item
+ *  is an actual purchasable device, not a ۷۰ هزار تومانی adapter cable. */
+function pickDeviceItem(items: unknown[], query: string): any | null {
+  if (!Array.isArray(items) || !items.length) return null;
+  const qNorm = normalizeText(query).replace(/\s+/g, " ").trim();
+  const qCompact = qNorm.replace(/\s+/g, "");
+  const isService = (t: string) => /تعمیر|خدمات|سرویس|نصب/.test(t);
+  let best: { item: any; score: number } | null = null;
+  for (const it of items) {
+    const t = normalizeText(String(it?.title ?? "")).replace(/\s+/g, " ").trim();
+    const tCompact = t.replace(/\s+/g, "");
+    let score = 0;
+    if (!t) { score = 0; }
+    else if (isService(t)) { score = 0; }
+    else if (t.startsWith(qNorm) || (qCompact.length >= 3 && tCompact.startsWith(qCompact))) score = 4;
+    else if (t.includes(qNorm)) score = 2;
+    if (score > 0 && typeof it?.min_price_toman === "number") score += 1;
+    if (score > 0 && (!best || score > best.score)) best = { item: it, score };
+  }
+  if (best) return best.item;
+  // no title match at all (relaxed query) → first priced, then first item
+  return items.find((i: any) => typeof i?.min_price_toman === "number") ?? items[0] ?? null;
+}
 
 /** Progressive query relaxation for the deterministic fallback: try the
  *  cleaned full query first, then keyword+connectivity, then keyword only,
@@ -1190,21 +1277,43 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
           r = tools.searchProducts(kw, { sort: f.sort, limit: 6 });
           relaxed = true;
         }
+        // device-category refinement per keyword (real device, not accessory)
+        let kwCategory: string | null = null;
+        if (r.total > 0) {
+          const kwNorm = normalizeText(kw).replace(/\s+/g, " ").trim();
+          const hasReal = r.items.some(
+            (i: any) => normalizeText(String(i.title ?? "")).replace(/\s+/g, " ").trim().startsWith(kwNorm)
+          );
+          if (!hasReal) {
+            const cat = tools.suggestCategory(kw);
+            if (cat) {
+              const r2 = tools.searchProducts(kw, { category: cat, sort: f.sort, limit: 6 });
+              if (r2.total > 0) {
+                r = r2;
+                kwCategory = cat;
+              }
+            }
+          }
+        }
         steps.push({
           index: steps.length,
           tool: "search_products",
           label: TOOL_LABELS["search_products"],
-          thinking: relaxed
-            ? `«${kw}» با فیلترهای شما نتیجه نداشت؛ بدون فیلتر جست‌وجو کردم (حالت بدون هوش مصنوعی)`
-            : `جست‌وجوی «${kw}» در دیتابیس (حالت بدون هوش مصنوعی)`,
-          args: { query: kw },
+          thinking: kwCategory
+            ? `«${kw}» را در دستهٔ واقعی آن («${kwCategory}») جست‌وجو کردم تا لوازم جانبیِ آن نیاید (حالت بدون هوش مصنوعی)`
+            : relaxed
+              ? `«${kw}» با فیلترهای شما نتیجه نداشت؛ بدون فیلتر جست‌وجو کردم (حالت بدون هوش مصنوعی)`
+              : `جست‌وجوی «${kw}» در دیتابیس (حالت بدون هوش مصنوعی)`,
+          args: { query: kw, category: kwCategory },
           observation: compactResult("search_products", r),
           status: "ok",
           fact: factLine("search_products", r, { query: kw }),
         });
         totalSum += r.total;
         mergedItems.push(...r.items.slice(0, 2));
-        const top = r.items.find((i: any) => typeof i.min_price_toman === "number") ?? r.items[0];
+        // pick a REAL device for this keyword (title starts with it), not an
+        // accessory or repair listing that merely mentions it
+        const top = pickDeviceItem(r.items, kw);
         if (top) {
           foundCount++;
           lines.push(
@@ -1317,9 +1426,12 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
       };
     }
   }
-  if (!candidates.length) {
-    // No usable search terms at all: either a vague shopping wish («یه چیزی
-    // میخوام») → ask for the missing category, or off-topic chat → redirect.
+  if (!candidates.length || (!hasProductKeyword && !session.productQuery && !session.category && !SHOPPING_INTENT_RE.test(normMsg))) {
+    // No usable search terms OR non-shopping chat with no product keyword and
+    // no remembered product (identity questions, off-topic, prompt injection,
+    // gibberish): never waste a search on the junk query and never poison the
+    // session with it — either ask for the missing category (vague shopping
+    // wish like «یه چیزی میخوام») or redirect to the shopping scope.
     const intent = SHOPPING_INTENT_RE.test(normMsg) || hasProductKeyword;
     return {
       steps,
@@ -1408,6 +1520,29 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
         }
       }
     }
+    // Device-category refinement: in a price-ascending window the cheapest
+    // items for a device query («لپ تاپ») are usually its ACCESSORIES (cables,
+    // adapters, cases — «تبدیل آداپتور به لپ تاپ» at ۷۰ هزار تومان). If no
+    // item in the window is a genuine device (title starts with the query
+    // phrase), re-search inside the phrase's dominant category so the quoted
+    // cheapest item is a real purchasable device.
+    let categoryRefined: string | null = null;
+    if (result0.total > 0) {
+      const qNorm = normalizeText(query).replace(/\s+/g, " ").trim();
+      const hasRealDevice = result0.items.some(
+        (i) => normalizeText(String(i.title ?? "")).replace(/\s+/g, " ").trim().startsWith(qNorm)
+      );
+      if (!hasRealDevice) {
+        const cat = tools.suggestCategory(query);
+        if (cat) {
+          const r2 = tools.searchProducts(query, { category: cat, sort: fallbackSort, limit: 12 });
+          if (r2.total > 0) {
+            result0 = r2;
+            categoryRefined = cat;
+          }
+        }
+      }
+    }
     const fact = factLine("search_products", result0, { query });
     steps.push({
       index: 0,
@@ -1415,25 +1550,34 @@ function deterministicFallback(message: string, session: ShoppingSession, facts:
       label: TOOL_LABELS["search_products"],
       thinking: probeUsed
         ? `با فیلترهای شما نتیجه‌ای نبود؛ بدون فیلتر جست‌وجو کردم (حالت بدون هوش مصنوعی)`
-        : candidates.length > 1 && query !== candidates[0]
-          ? `اول «${candidates[0]}» جست‌وجو کردم؛ چون نتیجه نداشت عبارت را ساده‌تر کردم به «${query}»`
-          : "جست‌وجوی مستقیم در دیتابیس (حالت بدون هوش مصنوعی)",
-      args: { query, relaxed: candidates.findIndex((c) => c === query), probe: probeUsed },
+        : categoryRefined
+          ? `برای اینکه ارزان‌ترین کالای واقعی را ببینید، جست‌وجو را به دستهٔ «${categoryRefined}» محدود کردم تا لوازم جانبی نتایج را نگیرند (حالت بدون هوش مصنوعی)`
+          : candidates.length > 1 && query !== candidates[0]
+            ? `اول «${candidates[0]}» جست‌وجو کردم؛ چون نتیجه نداشت عبارت را ساده‌تر کردم به «${query}»`
+            : "جست‌وجوی مستقیم در دیتابیس (حالت بدون هوش مصنوعی)",
+      args: { query, relaxed: candidates.findIndex((c) => c === query), probe: probeUsed, category: categoryRefined },
       observation: compactResult("search_products", result0),
       status: "ok",
       fact,
     });
 
+    const count = result0.total;
+    // Session hygiene: remember the query only when it actually produced
+    // results (a junk/failed query must not poison later follow-ups), and
+    // NEVER mark budget as answered unless a budget was really expressed —
+    // otherwise the budget question would be silently suppressed forever.
+    const hadBudget = parsed.maxBudget !== null || parsed.minBudget !== null || session.budgetMin !== null || session.budgetMax !== null;
     const updatedSession = updateSession(session, {
-      productQuery: query,
-      category: parsed.terms.find((t) => PRODUCT_KEYWORDS.includes(t)) ?? query,
+      productQuery: count > 0 ? query : session.productQuery,
+      category: count > 0 ? (parsed.terms.find((t) => PRODUCT_KEYWORDS.includes(t)) ?? query) : session.category,
       budgetMax: parsed.maxBudget ?? session.budgetMax,
       budgetMin: parsed.minBudget ?? session.budgetMin,
-      answersGiven: [...new Set([...session.answersGiven, "budget"])],
+      answersGiven: hadBudget ? [...new Set([...session.answersGiven, "budget"])] : session.answersGiven,
     });
 
-    const count = result0.total;
-    const cheapest = result0.items.find((i) => i.min_price_toman !== null);
+    // «ارزان‌ترین …» line: quote a REAL device whose title starts with the
+    // query (a laptop, not a ۷۰ هزار تومانی «تبدیل آداپتور به لپ تاپ»).
+    const cheapest = pickDeviceItem(result0.items, query) ?? result0.items.find((i) => i.min_price_toman !== null);
     // «از حافظهٔ گفتگو» is only honest when the message itself contained NO
     // product keyword and the query was taken from the remembered session.
     const usedMemory = !hasProductKeyword && !!session.productQuery && candidates.length > 1 && query === candidates[candidates.length - 1];
@@ -1596,6 +1740,10 @@ export async function POST(req: Request) {
   const runAgent = async (send: (ev: unknown) => void): Promise<AgentResponseBody> => {
     const steps: AgentStep[] = [];
     const rawResults: { tool: string; args: Record<string, unknown>; result: unknown }[] = [];
+    // signature → compact observation of every SUCCESSFUL tool execution this
+    // turn; a duplicate call (model loop) replays the cached observation and
+    // gets an explicit nudge instead of burning another step + DB query.
+    const executed = new Map<string, unknown>();
     let reply = "";
     let generative: GenerativePayload | null = null;
 
@@ -1658,6 +1806,35 @@ export async function POST(req: Request) {
         }
 
         // Tool call
+        // Duplicate (same tool + same args as an earlier SUCCESSFUL call this
+        // turn) → replay the cached observation, never re-execute.
+        const sig = toolSignature(action.name, action.args);
+        const cachedCompact = executed.get(sig);
+        if (cachedCompact !== undefined) {
+          const dupStep: AgentStep = {
+            index: stepIndex++,
+            tool: action.name,
+            label: TOOL_LABELS[action.name] ?? action.name,
+            thinking: "این پرس‌وجو را همین حالا اجرا کردم؛ نتیجهٔ ذخیره‌شده را دوباره دیدم و جلو می‌روم.",
+            args: action.args,
+            observation: cachedCompact,
+            status: "ok",
+            fact: null, // the fact line was already recorded on the first execution
+          };
+          steps.push(dupStep);
+          send({ type: "step", step: dupStep });
+          loopMsgs.push({
+            role: "assistant",
+            content: JSON.stringify({ thinking: parsed.thinking ?? "", action }),
+          });
+          loopMsgs.push({
+            role: "user",
+            content: `[TOOL_RESULT ${action.name}] (DUPLICATE — same result as before)
+${JSON.stringify(cachedCompact).slice(0, OBSERVATION_CHAR_LIMIT)}
+⚠️ DUPLICATE_TOOL_CALL: این ابزار را با همین پارامترها همین حالا اجرا کردی و نتیجه بالا معتبر است. دوباره صدا نزن؛ با اطلاعات موجود جلو برو یا همین حالا action نهایی (type=final) بفرست.`,
+          });
+          continue;
+        }
         let result: unknown = null;
         let error: string | null = null;
         try {
@@ -1666,6 +1843,7 @@ export async function POST(req: Request) {
           error = e instanceof Error ? e.message : String(e);
         }
         const compact = error ? { error } : compactResult(action.name, result);
+        if (!error) executed.set(sig, compact);
         const step: AgentStep = {
           index: stepIndex++,
           tool: action.name,
