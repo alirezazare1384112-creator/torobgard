@@ -221,13 +221,24 @@ export function TripView() {
             هنوز محصولی اضافه نکردی. از تب «جست‌وجو» محصول‌ها را پیدا کن و «افزودن به برنامهٔ خرید» را بزن.
           </p>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-col gap-2">
             {cartItems.map((i) => (
-              <Badge key={i.product_id} variant="secondary" className="gap-1 py-1.5">
-                <span className="line-clamp-1 max-w-48">{i.title}</span>
-                {i.min_price_toman !== null && <span className="font-num text-muted-foreground">• {formatToman(i.min_price_toman)}</span>}
-                <button type="button" onClick={() => removeFromCart(i.product_id)} aria-label="حذف از سبد" className="mr-0.5"><Trash2 className="size-3" aria-hidden /></button>
-              </Badge>
+              <div key={i.product_id} className="flex items-center gap-3 rounded-lg border border-border bg-card p-2">
+                {i.image_url ? (
+                  <img src={i.image_url} alt={i.title} loading="lazy" className="size-12 shrink-0 rounded-md object-cover" />
+                ) : (
+                  <span className="flex size-12 shrink-0 items-center justify-center rounded-md bg-muted"><Store className="size-5 text-muted-foreground" aria-hidden /></span>
+                )}
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span className="line-clamp-2 text-xs font-medium leading-tight">{i.title}</span>
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                    {i.min_price_toman !== null && <span className="font-num font-semibold text-primary">{formatToman(i.min_price_toman)}</span>}
+                    {i.offer_count !== undefined && <Badge variant="outline" className="font-num text-[10px]">{toPersianDigits(i.offer_count)} پیشنهاد</Badge>}
+                    {i.nearest_shop_name && <span className="line-clamp-1">• نزدیک‌ترین: {i.nearest_shop_name}</span>}
+                  </div>
+                </div>
+                <button type="button" onClick={() => removeFromCart(i.product_id)} aria-label={`حذف ${i.title} از سبد`} className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"><Trash2 className="size-4" aria-hidden /></button>
+              </div>
             ))}
           </div>
         )}
@@ -294,21 +305,62 @@ export function TripView() {
             <p className="text-sm text-amber-600">هیچ فروشگاهی برای این محصولات پیدا نشد. محصولات را عوض کن یا حداکثر توقف‌ها را زیاد کن.</p>
           ) : (
             <>
-              {/* schematic route map */}
+              {/* Real OpenStreetMap embed (no API key needed) showing the area
+                  covering the start + all stops. Below it, the schematic SVG
+                  shows the route with shop names. */}
+              {(() => {
+                // Compute bbox covering start + all stops
+                const lats: number[] = [];
+                const lons: number[] = [];
+                if (loc) { lats.push(loc.lat); lons.push(loc.lon); }
+                mappedStops.forEach((s) => { if (s.shop.lat !== null && s.shop.lon !== null) { lats.push(s.shop.lat!); lons.push(s.shop.lon!); } });
+                if (lats.length >= 2) {
+                  const minLat = Math.min(...lats) - 0.005;
+                  const maxLat = Math.max(...lats) + 0.005;
+                  const minLon = Math.min(...lons) - 0.005;
+                  const maxLon = Math.max(...lons) + 0.005;
+                  // OSM embed: bbox=minLon,minLat,maxLon,maxLat&marker=start
+                  const marker = loc ? `&marker=${loc.lat},${loc.lon}` : "";
+                  const osmUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${minLon},${minLat},${maxLon},${maxLat}&layer=mapnik${marker}`;
+                  return (
+                    <div className="overflow-hidden rounded-lg border border-border">
+                      <iframe
+                        title="نقشهٔ مسیر خرید"
+                        src={osmUrl}
+                        className="h-64 w-full"
+                        loading="lazy"
+                        style={{ border: 0 }}
+                      />
+                      <p className="bg-muted/30 px-3 py-1.5 text-[11px] text-muted-foreground">
+                        نقشهٔ واقعی (OpenStreetMap) — نقطهٔ سبز = شروع. برای مسیر هر توقف از لینک گوگل مپ پایین استفاده کن.
+                      </p>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
+
+              {/* Schematic route map with shop names */}
               {points.length > 0 && (
                 <div className="rounded-lg border border-border bg-muted/20 p-2">
                   <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="h-auto w-full" role="img" aria-label="مسیر شماتیک خرید">
-                    <rect x={0} y={0} width={VB_W} height={VB_H} className="fill-muted/30" />
-                    <rect x={PAD} y={PAD} width={VB_W - 2 * PAD} height={VB_H - 2 * PAD} rx={16} className="fill-background stroke-border" strokeWidth={2} />
+                    {/* Neighborhood reference points (light gray dots) */}
+                    {Object.entries(NB_COORDS).map(([name, [nlat, nlon]]) => (
+                      <g key={name} transform={`translate(${lonToX(nlon)}, ${latToY(nlat)})`}>
+                        <circle r={2} className="fill-muted-foreground/30" />
+                        <text x={4} y={3} className="fill-muted-foreground/50 text-[9px]" style={{ fontFamily: "var(--font-vazirmatn), sans-serif" }}>{name}</text>
+                      </g>
+                    ))}
+                    <rect x={PAD} y={PAD} width={VB_W - 2 * PAD} height={VB_H - 2 * PAD} rx={16} className="fill-background/50 stroke-border/50" strokeWidth={1} />
                     {pathD && <path d={pathD} fill="none" className="stroke-primary" strokeWidth={2.5} strokeDasharray="6 6" />}
                     {points.map((p, i) => (
                       <g key={i} transform={`translate(${p.x}, ${p.y})`}>
-                        <circle r={p.isStart ? 6 : 5} className={p.isStart ? "fill-emerald-600" : "fill-primary"} />
-                        <text x={8} y={-6} className="fill-foreground text-[11px]" style={{ fontFamily: "var(--font-vazirmatn), sans-serif" }}>{p.isStart ? "شروع" : `توقف ${toPersianDigits(i)}`}</text>
+                        <circle r={p.isStart ? 7 : 6} className={p.isStart ? "fill-emerald-600" : "fill-primary"} stroke="white" strokeWidth={1.5} />
+                        <text x={10} y={0} className="fill-foreground text-[12px] font-medium" style={{ fontFamily: "var(--font-vazirmatn), sans-serif" }}>{p.isStart ? "📍 شروع" : `${toPersianDigits(i)}. ${p.label}`}</text>
                       </g>
                     ))}
                   </svg>
-                  <p className="mt-1 text-[11px] text-muted-foreground">مسیر شماتیک (فاصلهٔ هوایی) — برای مسیر واقعی از لینک مپ هر توقف استفاده کن.</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">مسیر شماتیک با نام فروشگاه‌ها — برای مسیر واقعی از لینک مپ هر توقف استفاده کن.</p>
                 </div>
               )}
 

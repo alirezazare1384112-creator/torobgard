@@ -54,6 +54,14 @@ function buildUrl(filters: SearchFiltersState, offset: number): string {
   if (filters.near !== "all") {
     sp.set("near", filters.near);
     sp.set("radius_km", String(filters.radius_km));
+  } else if (filters.lat === null || filters.lon === null) {
+    // When the user hasn't selected a location AND hasn't used "موقعیت من",
+    // default to central Tehran (میدان ولیعصر) so distance_km is always shown.
+    // This way users always see distance in search results, even with "همه تهران".
+    // The distance is from the city center — selecting a specific neighborhood
+    // gives more accurate distances.
+    sp.set("lat", "35.6997");
+    sp.set("lon", "51.413");
   }
   if (filters.lat !== null && filters.lon !== null) {
     sp.set("lat", String(filters.lat));
