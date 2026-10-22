@@ -24,7 +24,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Slider } from "@/components/ui/slider";
 import { useCart } from "./cart-store";
 import { formatDistanceKm, formatNumber, formatPersianDate, formatToman, toPersianDigits } from "./format";
-import { SyntheticNameBadge } from "./disclaimers";
+import { SyntheticNameBadge, FloorUnitBadge, MarketComparisonBadge } from "./disclaimers";
 import { DEFAULT_WEIGHTS, rankOffers, type RankWeights, type RankedOffer } from "./rank";
 import type {
   AlternativeItem,
@@ -145,10 +145,12 @@ function OfferRow({
   offer,
   cheapest,
   ranked,
+  allOfferPrices,
 }: {
   offer: CompareOffer;
   cheapest: number | null;
   ranked?: RankedOffer;
+  allOfferPrices: number[];
 }) {
   const isCheapest = cheapest !== null && offer.price_status === "ok" && offer.price_toman === cheapest;
   const top = ranked?.breakdown?.some((b) => b.contribution > 0) ? ranked : undefined;
@@ -183,10 +185,13 @@ function OfferRow({
       </div>
 
       {offer.shop.address && (
-        <p className="flex items-start gap-2 text-xs text-muted-foreground">
-          <MapPin className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-          {offer.shop.address}
-        </p>
+        <div className="flex flex-col gap-1.5">
+          <p className="flex items-start gap-2 text-xs text-muted-foreground">
+            <MapPin className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            {offer.shop.address}
+          </p>
+          <FloorUnitBadge address={offer.shop.address} />
+        </div>
       )}
 
       <div className="flex flex-wrap items-center gap-1.5">
@@ -227,10 +232,20 @@ function OfferRow({
       </div>
 
       <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
-        <div className="text-lg font-bold font-num">
-          {offer.price_status === "ok" || offer.price_toman !== null
-            ? formatToman(offer.price_toman)
-            : "نامشخص"}
+        <div className="flex items-center gap-2">
+          <div className="text-lg font-bold font-num">
+            {offer.price_status === "ok" || offer.price_toman !== null
+              ? formatToman(offer.price_toman)
+              : "نامشخص"}
+          </div>
+          {/* "x% ارزان‌تر از بازار" — compare this offer's price to the median
+              of OTHER offers' valid prices. Only shown when meaningfully below. */}
+          {offer.price_status === "ok" && offer.price_toman !== null && allOfferPrices.length >= 3 && (
+            <MarketComparisonBadge
+              price={offer.price_toman}
+              referencePrices={allOfferPrices.filter((p) => p !== offer.price_toman)}
+            />
+          )}
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
           <span className="flex items-center gap-1">
@@ -351,6 +366,11 @@ export function ProductView({
   const offers = compare?.offers ?? [];
   const summary = compare?.summary;
   const cheapest = summary?.min_price_toman ?? null;
+  // All valid offer prices — used by MarketComparisonBadge to compute
+  // "x% cheaper than market" per offer.
+  const allOfferPrices = offers
+    .filter((o) => o.price_status === "ok" && o.price_toman !== null)
+    .map((o) => o.price_toman!) as number[];
 
   // explainable ranking (user-tunable weights)
   const [weights, setWeights] = React.useState<RankWeights>(DEFAULT_WEIGHTS);
@@ -585,7 +605,7 @@ export function ProductView({
               {ranked.map((r) => {
                 const o = offers.find((x) => x.price_toman === r.price_toman && x.shop.distance_km === r.distance_km);
                 if (!o) return null;
-                return <OfferRow key={o.offer_id} offer={o} cheapest={cheapest} ranked={r} />;
+                return <OfferRow key={o.offer_id} offer={o} cheapest={cheapest} ranked={r} allOfferPrices={allOfferPrices} />;
               })}
             </div>
             </React.Fragment>
